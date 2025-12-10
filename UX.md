@@ -104,9 +104,9 @@ Nordic Mesh Manager
 - **Width:** 60% of screen width
 - **Height:** 48dp (touch target)
 - **Style:** Material dropdown button with border
-- **Content:** Group name/ID (e.g., "Default" for 0xC000, user-created groups)
+- **Content:** Group name/ID (e.g., "Default" for 0xC000, user-created groups). Includes an 'Unknown' selection to show devices without group assignment.
 - **States:**
-  - **Default:** Shows currently selected group
+  - **Default:** Shows currently selected group (Default selected by default).
   - **Expanded:** Shows all discovered groups
   - **No groups:** Shows "No Groups Found" (disabled). Groups must be created via multi-select in the Devices list.
   - **Multi-select mode:** Changes to "Move to ▾" with group list
@@ -156,7 +156,7 @@ Nordic Mesh Manager
 #### Normal Mode (Default)
 - Tap device → Expand/collapse details
 - Tap "Trigger All" → Confirmation dialog → Send group message
-- Select group dropdown → Show group list → Filter devices
+- Select group dropdown → Show group list → Filter devices (Note: filtering only applies after group membership has been confirmed via trigger and observation. Selecting 'Unknown' shows devices with no group assignment immediately).
 
 #### Multi-Select Mode (Long-press activated)
 - **Entry:** Long-press any device (haptic feedback)
@@ -177,7 +177,7 @@ Nordic Mesh Manager
   - Text: "No devices detected"
   - Subtext: "Make sure devices are powered on and in range"
 - **No group selected:**
-  - Text: "Select a group to view devices"
+  - Text: "Select a group to view devices (note: group filtering only applies after group membership is confirmed)."
 
 ---
 

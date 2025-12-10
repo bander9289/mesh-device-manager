@@ -6,6 +6,7 @@ class MeshDevice {
   final int rssi;
   final String version;
   int? groupId;
+  bool? lightOn;
   MeshDevice({
     required this.macAddress,
     required this.identifier,
@@ -14,5 +15,6 @@ class MeshDevice {
     required this.rssi,
     required this.version,
     this.groupId,
+    this.lightOn,
   });
 }

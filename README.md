@@ -113,12 +113,12 @@ lib/
    ```
 
 3. **Configure mesh credentials:**
-   Edit hardcoded mesh credentials in `lib/services/mesh_client.dart`:
+   Edit hardcoded mesh credentials in `lib/managers/device_manager.dart`:
    ```dart
-   static const meshNetworkKey = [...]; // 128-bit network key
-   static const meshAppKey = [...];     // 128-bit app key
-   static const meshIvIndex = 0x00000000;
+   // Replace values in DeviceManager constructor: setMeshCredentials()
+   await deviceManager.setMeshCredentials({'netKey': '<your network key>', 'appKey': '<your app key>'});
    ```
+
 
 4. **Run the app:**
    ```bash
@@ -215,7 +215,7 @@ enum BatteryLevel {
 1. Launch the app
 2. Grant Bluetooth and location permissions when prompted
 3. Devices automatically appear as they're discovered
-4. Select a group from the dropdown to filter devices
+4. Select a group from the dropdown to filter devices (note: device masking by selected group only applies after the app has confirmed group membership by triggering and observing device changes; the 'Unknown' option shows devices without a group assignment immediately)
 
 ### Triggering Devices
 

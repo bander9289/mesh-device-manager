@@ -62,8 +62,8 @@ Provide field technicians and administrators with a reliable, efficient tool for
 **Priority:** P0 (Must Have)
 
 #### Requirements
-- **FR-3.2.1:** Display dropdown selector showing all discovered mesh groups
-- **FR-3.2.2:** Filter device list by selected group
+- **FR-3.2.1:** Display dropdown selector showing discovered mesh groups; include an "Unknown" entry to list devices with no group assignment and default to the Default group (0xC000).
+- **FR-3.2.2:** Filter device list by selected group, but only after group membership has been confirmed (via trigger and observation). For the 'Unknown' selection, filter immediately to show devices with no group assignment.
 - **FR-3.2.3:** Support long-press multi-select for device group changes
 - **FR-3.2.4:** Transform group selector to "Move to [Group]" when devices selected
 - **FR-3.2.5:** Require confirmation before moving devices to new group
@@ -136,8 +136,8 @@ The following credentials must be hardcoded in the application:
 
 ### 4.1 Main Screen (Devices Tab)
 - **Top Section:**
-  - Group selector dropdown
-  - "Trigger All" button (when group selected)
+  - Group selector dropdown (defaults to "Default" 0xC000, includes an "Unknown" option to show devices without group assignments)
+  - "Trigger All" button (when a valid group is selected)
 - **Device List:**
   - Device identifier (last 6 MAC nibbles)
   - Battery indicator (green/orange/red)
@@ -255,7 +255,7 @@ The following credentials must be hardcoded in the application:
 
 ### 9.1 Functional Acceptance
 - [ ] Continuous device discovery working
-- [ ] Group filtering operational
+- [ ] Group filtering operational (dropdown defaults to Default, 'Unknown' option available, filtering only applies after confirmation)
 - [ ] Group triggering sends correct mesh messages
 - [ ] Battery levels display with correct thresholds
 - [ ] Multi-device firmware updates complete successfully

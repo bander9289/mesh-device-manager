@@ -423,6 +423,8 @@ class FirmwareFile {
 - Manage group membership
 - Send group-targeted messages
 
+Note: The UI group dropdown defaults to the "Default" group (0xC000). An "Unknown" selection is provided (internal id -1) to show devices with no group assignment; filtering by a selected group only applies once the app has confirmed group membership (e.g., after triggering and observing device state changes).
+
 **Implementation:**
 ```dart
 class GroupManager extends ChangeNotifier {

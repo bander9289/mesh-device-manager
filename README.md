@@ -29,6 +29,8 @@ Nordic BLE Mesh Manager provides field technicians and administrators with an ef
 - Show device identifier (last 6 MAC nibbles)
 - Battery level indicators (green/orange/red)
 - Signal strength monitoring (RSSI)
+ - Device On/Off Spinner: when a device is "On" the UI shows a small spinner near its battery indicator so you can quickly see which devices are currently active; the spinner clears when the device returns to "Off".
+ - Device Details view: Short-press a device in the device list to open a Device Details view that shows advertised services, discovered characteristics, battery, and connection status. The view provides "Read Battery Now", "Toggle Candidate" and subscription options for testing per-device control and for debugging vendor-specific characteristics.
 
 ### Group Operations
 - Filter devices by mesh group (groups are created by the user and start empty)
@@ -149,6 +151,30 @@ flutter build apk --release
 flutter build appbundle --release
 ```
 
+### Enabling Android native nRF Mesh SDK (optional)
+
+To use the native Nordic nRF Mesh SDK for group messages on Android, add the official SDK to the app module dependencies and enable it in `android/app/build.gradle`:
+
+1. Add the dependency (uncomment below and replace <version>):
+
+```gradle
+dependencies {
+   // implementation "no.nordicsemi.android:mesh:<version>"
+}
+```
+
+2. After including the SDK, the Android plugin (MainActivity + MeshPlugin) will dynamically detect and use it for sending mesh messages. If the SDK isn't present, the plugin falls back to the simulated behavior.
+
+3. Build and run:
+
+```bash
+flutter clean
+flutter pub get
+flutter run -d android
+```
+
+If you want help adding the exact Maven coordinate and version for the SDK, tell me which Nordic SDK and version you prefer and I will add it to the Gradle files.
+
 ### iOS Setup
 
 **Minimum Requirements:**
@@ -221,6 +247,7 @@ enum BatteryLevel {
 
 1. Select a group from the dropdown
 2. Tap "Trigger All" button
+   - If you have selected one or more devices (long-press to select), the same Trigger button will trigger only those selected devices; the UI shows a clear label of what will be triggered (e.g., "Selected: N" or the group name).
 3. Confirm the action
 4. All devices in the group receive the mesh command
 

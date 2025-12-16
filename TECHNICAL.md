@@ -82,6 +82,7 @@ The Nordic BLE Mesh Manager is a cross-platform mobile application built with Fl
    - Additional mesh configuration data
 6. Update device state in StateManager
 7. Notify UI to refresh device list
+8. Per-Device details: The app provides a Device Details view for per-device diagnostics showing derived & discovered services and characteristics, allowing manual reads, writes, and subscriptions for quick debug and mapping of vendor-specific controls.
 ```
 
 #### Group Trigger Flow
@@ -92,6 +93,7 @@ The Nordic BLE Mesh Manager is a cross-platform mobile application built with Fl
 4. Message targeted to group address
 5. MeshClient sends message via mesh network
 6. UI displays confirmation/error
+7. When devices receive a trigger, the app polls per-device OnOff state and displays a small spinner next to the battery indicator for devices that are currently "on"; spinners are cleared when the device returns to "off".
 ```
 
 #### Firmware Update Flow
@@ -166,6 +168,7 @@ enum BatteryLevel {
 - Use `ChangeNotifier` with `Provider` pattern
 - Expose streams for real-time updates
 - Implement device timeout/cleanup (remove after 30s not seen)
+- Periodic state polling: the manager polls `getLightStates` from the `MeshClient` every 5 seconds while scanning to detect per-device OnOff states and update the UI spinner indicator.
 
 ### 3.2 Mesh Client
 
@@ -226,6 +229,7 @@ Destination: Group address (0xC000 + group_id)
 - May require native platform channels if no Flutter BLE Mesh library exists
 - Consider using Nordic's nRF Mesh library via platform channels
 - Fallback: Use Generic Attribute Profile (GATT) proxy for mesh access
+- Note: `sendGroupMessage` (implemented on `MeshClient`) supports an optional list of MAC addresses to target specific devices for single-device toggling; `DeviceManager` exposes a helper `triggerDevices(List<String> macs)` which uses this capability.
 
 ### 3.3 BAS (Battery Service) Client
 

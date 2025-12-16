@@ -42,3 +42,16 @@ android {
 flutter {
     source = "../.."
 }
+
+dependencies {
+    // Kotlin coroutines
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
+
+    // Nordic Android BLE Library (Kotlin)
+    implementation("no.nordicsemi.android:ble-ktx:2.8.3")
+    implementation("no.nordicsemi.android:ble:2.8.3")
+
+    // Nordic nRF Mesh Library (Java - published to Maven)
+    implementation("no.nordicsemi.android:mesh:3.2.1")
+}

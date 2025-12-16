@@ -59,4 +59,9 @@ flutter {
     source '../..'
 }
 
-dependencies {}
+dependencies {
+    // Android native Nordic nRF Mesh SDK (stable version)
+    implementation "no.nordicsemi.android:mesh:3.4.0"
+    // Recommended: Android BLE library used by nRF Mesh
+    implementation "no.nordicsemi.android:ble:2.4.0"
+}

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'mesh_client.dart';
 import '../models/mesh_device.dart';
@@ -9,6 +10,9 @@ import '../models/mesh_device.dart';
 class GattMeshClient implements MeshClient {
   List<MeshDevice> Function() deviceProvider;
   final MeshClient? fallback;
+  final bool Function()? isAppScanning; // optional provider to determine whether the app is scanning
+  final Map<String, StreamSubscription<BluetoothConnectionState>> _connectionStateListeners = {}; // Track connection states
+  final Set<String> _connectingDevices = {}; // Track devices currently connecting
 
   // Candidate characteristic UUIDs commonly used for light toggle / vendor features
   static const List<String> _candidateUuids = [
@@ -17,7 +21,10 @@ class GattMeshClient implements MeshClient {
     '0000ff02-0000-1000-8000-00805f9b34fb',
   ];
 
-  GattMeshClient({required this.deviceProvider, this.fallback});
+  GattMeshClient({required this.deviceProvider, this.fallback, this.isAppScanning});
+
+  // Track active subscriptions per device MAC -> characteristic uuid -> stream subscription
+  final Map<String, Map<String, StreamSubscription<List<int>>>> _activeSubscriptions = {};
 
   @override
   Future<void> initialize(Map<String, String>? credentials) async {
@@ -25,43 +32,215 @@ class GattMeshClient implements MeshClient {
     await fallback?.initialize(credentials);
   }
 
-  Future<BluetoothDevice?> _getDeviceByMac(String mac) async {
-    dynamic con = FlutterBluePlus.connectedDevices;
-    List<BluetoothDevice> devicesList;
-    if (con is Future) {
+  static DateTime? _lastLocalScan;
+
+  String _cleanMac(String mac) => mac.toLowerCase().replaceAll('-', '').replaceAll(':', '');
+  String _colonMac(String mac) => mac.toLowerCase().replaceAll('-', ':');
+
+  Future<BluetoothDevice?> _getDeviceByMac(String mac, {bool allowScan = true}) async {
+    final normalizedMac = _colonMac(mac);
+    final normalizedMacNoSep = _cleanMac(mac);
+    
+    // 1. First check connected devices
+    final dynamic con = FlutterBluePlus.connectedDevices;
+    List<BluetoothDevice> devicesList = [];
+    if (con is Future<List<BluetoothDevice>>) {
       devicesList = await con;
-    } else {
-      devicesList = con as List<BluetoothDevice>;
+    } else if (con is List<BluetoothDevice>) {
+      devicesList = con;
     }
     try {
-      return devicesList.firstWhere((d) => d.remoteId.toString() == mac);
+      if (kDebugMode) debugPrint('GattMeshClient._getDeviceByMac: connectedDevices count=${devicesList.length}');
+      final connected = devicesList.firstWhere((d) {
+        final rid = d.remoteId.toString().toLowerCase().replaceAll('-', ':');
+        final ridNoSep = rid.replaceAll(':', '');
+        return rid == normalizedMac || ridNoSep == normalizedMacNoSep;
+      });
+      if (kDebugMode) debugPrint('GattMeshClient._getDeviceByMac: found connected device $mac');
+      return connected;
     } catch (_) {}
-    // attempt to find via scan results
+    
+    // 2. Check if app is currently scanning - use existing scan results
+    final appScanning = isAppScanning?.call() ?? false;
+    if (appScanning || !allowScan) {
+      // App is already scanning or we're not allowed to scan - check recent results only
+      try {
+        final searchAttempts = appScanning ? 10 : 3;
+        final stream = FlutterBluePlus.scanResults;
+        for (int i = 0; i < searchAttempts; i++) {
+          final resList = await stream.first.timeout(
+            Duration(milliseconds: appScanning ? 500 : 200), 
+            onTimeout: () => <ScanResult>[]
+          );
+          if (kDebugMode && i == 0) {
+            debugPrint('GattMeshClient._getDeviceByMac: scanResults attempt $i size=${resList.length}');
+          }
+          for (final r in resList) {
+            final rid = r.device.remoteId.toString().toLowerCase().replaceAll('-', ':');
+            final ridNoSep = rid.replaceAll(':', '');
+            if (rid == normalizedMac || ridNoSep == normalizedMacNoSep) {
+              if (kDebugMode) debugPrint('GattMeshClient._getDeviceByMac: found in scan results $mac');
+              return r.device;
+            }
+          }
+          await Future.delayed(const Duration(milliseconds: 300));
+        }
+        if (kDebugMode) debugPrint('GattMeshClient._getDeviceByMac: device $mac not found in existing scan results');
+        return null;
+      } catch (e) {
+        if (kDebugMode) debugPrint('GattMeshClient._getDeviceByMac: error checking scan results: $e');
+        return null;
+      }
+    }
+    
+    // 3. Only start dedicated scan if explicitly allowed and app not already scanning
+    final now = DateTime.now();
+    // Throttle: if last scan started < 8s ago, skip to prevent registration failures
+    if (_lastLocalScan != null && now.difference(_lastLocalScan!).inSeconds < 8) {
+      if (kDebugMode) debugPrint('GattMeshClient._getDeviceByMac: skipping dedicated scan (throttled, ${now.difference(_lastLocalScan!).inSeconds}s ago)');
+      return null;
+    }
+    
     try {
+      _lastLocalScan = now;
+      if (kDebugMode) debugPrint('GattMeshClient._getDeviceByMac: starting dedicated scan for $mac (3s)');
       FlutterBluePlus.startScan(timeout: const Duration(seconds: 3));
-      final resList = await FlutterBluePlus.scanResults.first; // List<ScanResult>
-      for (final r in resList) {
-        if (r.device.remoteId.toString() == mac) {
-          FlutterBluePlus.stopScan();
-          return r.device;
+      
+      final stream = FlutterBluePlus.scanResults;
+      final start = DateTime.now();
+      while (DateTime.now().difference(start) < const Duration(seconds: 3)) {
+        final resList = await stream.first.timeout(
+          const Duration(milliseconds: 400), 
+          onTimeout: () => <ScanResult>[]
+        );
+        for (final r in resList) {
+          final rid = r.device.remoteId.toString().toLowerCase().replaceAll('-', ':');
+          final ridNoSep = rid.replaceAll(':', '');
+          if (rid == normalizedMac || ridNoSep == normalizedMacNoSep) {
+            try { await FlutterBluePlus.stopScan(); } catch (_) {}
+            if (kDebugMode) debugPrint('GattMeshClient._getDeviceByMac: found in dedicated scan $mac');
+            return r.device;
+          }
+        }
+        await Future.delayed(const Duration(milliseconds: 200));
+      }
+      try { await FlutterBluePlus.stopScan(); } catch (_) {}
+    } catch (e) {
+      if (kDebugMode) debugPrint('GattMeshClient._getDeviceByMac: dedicated scan error: $e');
+      try { await FlutterBluePlus.stopScan(); } catch (_) {}
+    }
+    
+    if (kDebugMode) debugPrint('GattMeshClient._getDeviceByMac: device $mac not found');
+    return null;
+  }
+
+  Future<bool> _connectWithRetry(BluetoothDevice device, {int attempts = 2}) async {
+    final deviceId = device.remoteId.toString();
+    
+    // Prevent concurrent connection attempts to same device
+    if (_connectingDevices.contains(deviceId)) {
+      if (kDebugMode) debugPrint('GattMeshClient._connectWithRetry: already connecting to $deviceId');
+      return false;
+    }
+    
+    _connectingDevices.add(deviceId);
+    
+    try {
+      dynamic lastError;
+      for (var attempt = 0; attempt < attempts; attempt++) {
+        try {
+          if (kDebugMode) debugPrint('GattMeshClient._connectWithRetry: connecting attempt ${attempt + 1} to ${device.remoteId}');
+          
+          // Setup connection state listener before connecting
+          final completer = Completer<BluetoothConnectionState>();
+          StreamSubscription<BluetoothConnectionState>? stateSubscription;
+          bool firstEvent = true;
+          
+          stateSubscription = device.connectionState.listen((state) {
+            if (kDebugMode) debugPrint('GattMeshClient._connectWithRetry: ${device.remoteId} state=$state');
+            
+            // Skip the first event (initial state) and only complete on state change
+            if (firstEvent) {
+              firstEvent = false;
+              return;
+            }
+            
+            if (!completer.isCompleted) {
+              completer.complete(state);
+            }
+          });
+          
+          try {
+            // Initiate connection with timeout
+            await device.connect(timeout: const Duration(seconds: 10), license: License.free);
+            
+            // Wait for connected state or timeout
+            final state = await completer.future.timeout(
+              const Duration(seconds: 10),
+              onTimeout: () => BluetoothConnectionState.disconnected,
+            );
+            
+            if (state == BluetoothConnectionState.connected) {
+              // Store subscription to keep monitoring connection
+              _connectionStateListeners[deviceId] = stateSubscription;
+              if (kDebugMode) debugPrint('GattMeshClient._connectWithRetry: ✓ Connected to ${device.remoteId}');
+              return true;
+            } else {
+              if (kDebugMode) debugPrint('GattMeshClient._connectWithRetry: ✗ Connection failed, state=$state');
+              await stateSubscription.cancel();
+              try { await device.disconnect(); } catch (_) {}
+            }
+          } catch (e) {
+            await stateSubscription.cancel();
+            throw e;
+          }
+        } on TimeoutException catch (e) {
+          lastError = e;
+          if (kDebugMode) debugPrint('GattMeshClient._connectWithRetry: ✗ Timeout on attempt ${attempt + 1}');
+          try { await device.disconnect(); } catch (_) {}
+        } catch (e) {
+          lastError = e;
+          if (kDebugMode) debugPrint('GattMeshClient._connectWithRetry: ✗ Error on attempt ${attempt + 1}: $e');
+          try { await device.disconnect(); } catch (_) {}
+        }
+        
+        if (attempt < attempts - 1) {
+          await Future.delayed(Duration(milliseconds: 1000 * (attempt + 1)));
         }
       }
-      FlutterBluePlus.stopScan();
-    } catch (_) {
-      try {
-        FlutterBluePlus.stopScan();
-      } catch (_) {}
+      if (kDebugMode) debugPrint('GattMeshClient._connectWithRetry: ✗ Failed to connect to ${device.remoteId} after $attempts attempts -> $lastError');
+      return false;
+    } finally {
+      _connectingDevices.remove(deviceId);
     }
-    return null;
   }
 
   Future<BluetoothCharacteristic?> _findCharacteristic(BluetoothDevice device) async {
     try {
+      if (kDebugMode) debugPrint('GattMeshClient._findCharacteristic: discovering services on ${device.remoteId}');
       final services = await device.discoverServices();
+      // 1) check candidate UUIDs (explicit match)
       for (final s in services) {
         for (final c in s.characteristics) {
           final uuid = c.uuid.toString().toLowerCase();
           if (_candidateUuids.contains(uuid)) return c;
+        }
+      }
+      // 2) fallback: find a writable characteristic that supports read or notify
+      for (final s in services) {
+        for (final c in s.characteristics) {
+          try {
+            final props = c.properties;
+            if (props.write || props.writeWithoutResponse) return c;
+          } catch (_) {}
+        }
+      }
+      // 3) as an additional fallback, find the first readable characteristic
+      for (final s in services) {
+        for (final c in s.characteristics) {
+          try {
+            if (c.properties.read) return c;
+          } catch (_) {}
         }
       }
     } catch (_) {}
@@ -70,29 +249,18 @@ class GattMeshClient implements MeshClient {
 
   @override
   Future<Map<String, bool>> getLightStates(List<String> macAddresses) async {
+    // For BLE Mesh devices, don't attempt direct GATT connections
+    // Return cached states from device provider (updated via mesh messages)
     final out = <String, bool>{};
+    final devices = deviceProvider();
     for (final mac in macAddresses) {
-      out[mac] = false;
+      final matches = devices.where((d) => d.macAddress.toLowerCase().replaceAll('-', ':') == mac.toLowerCase().replaceAll('-', ':')).toList();
+      MeshDevice? match;
+      if (matches.isNotEmpty) match = matches.first;
+      out[mac] = match?.lightOn ?? false;
     }
 
-    for (final mac in macAddresses) {
-      final device = await _getDeviceByMac(mac);
-      if (device == null) continue;
-      try {
-        // Required by latest FlutterBluePlus: provide license option
-        await device.connect(license: License.free);
-        final char = await _findCharacteristic(device);
-        if (char == null) {
-          await device.disconnect();
-          continue;
-        }
-        final val = await char.read();
-        await device.disconnect();
-        out[mac] = val.isNotEmpty && val.first == 0x01;
-      } catch (_) {
-        try { await device.disconnect(); } catch (_) {}
-      }
-    }
+    if (kDebugMode) debugPrint('GattMeshClient.getLightStates: returning cached states (mesh devices do not support direct GATT polling)');
 
     // If no states determined and fallback exists, use it
     if (out.values.every((v) => v == false) && fallback != null) {
@@ -103,23 +271,53 @@ class GattMeshClient implements MeshClient {
   }
 
   @override
-  Future<void> sendGroupMessage(int groupId) async {
+  Future<Map<String, int>> getBatteryLevels(List<String> macAddresses) async {
+    // For BLE Mesh devices, return cached battery levels from device provider
+    final out = <String, int>{};
+    final devices = deviceProvider();
+    for (final mac in macAddresses) {
+      final matches = devices.where((d) => d.macAddress.toLowerCase().replaceAll('-', ':') == mac.toLowerCase().replaceAll('-', ':')).toList();
+      MeshDevice? match;
+      if (matches.isNotEmpty) match = matches.first;
+      out[mac] = match?.batteryPercent ?? 0;
+    }
+    
+    // Battery levels come from advertisement manufacturer data, updated during scanning
+    return out;
+  }
+
+  @override
+  Future<void> sendGroupMessage(int groupId, [List<String>? macAddresses]) async {
     // Write toggled value to devices in the group
     final devices = deviceProvider();
-    final toToggle = devices.where((d) => d.groupId == groupId).toList();
+    List<MeshDevice> toToggle;
+    if (macAddresses != null && macAddresses.isNotEmpty) {
+      final normalized = macAddresses.map((m) => m.toLowerCase().replaceAll('-', ':')).toList();
+      toToggle = devices.where((d) => normalized.contains(d.macAddress.toLowerCase().replaceAll('-', ':'))).toList();
+    } else {
+      toToggle = devices.where((d) => d.groupId == groupId).toList();
+    }
     if (toToggle.isEmpty) {
       // fallback to underlying implementation if available
       return fallback?.sendGroupMessage(groupId) ?? Future.value();
     }
 
     for (final d in toToggle) {
-      BluetoothDevice? device = await _getDeviceByMac(d.macAddress);
-      if (device == null) continue;
+      BluetoothDevice? device = await _getDeviceByMac(d.macAddress, allowScan: true);
+      if (device == null) {
+        if (kDebugMode) debugPrint('GattMeshClient.sendGroupMessage: device ${d.macAddress} not found (not connected or not visible)');
+        continue;
+      }
       try {
-        // Required by latest FlutterBluePlus: provide license option
-        await device.connect(license: License.free);
+        if (kDebugMode) debugPrint('GattMeshClient.sendGroupMessage: connecting to ${device.remoteId} for group $groupId (target ${d.macAddress})');
+        final ok = await _connectWithRetry(device, attempts: 2);
+        if (!ok) {
+          if (kDebugMode) debugPrint('GattMeshClient.sendGroupMessage: connection failed to ${device.remoteId}; skipping');
+          continue;
+        }
         final char = await _findCharacteristic(device);
         if (char == null) {
+          if (kDebugMode) debugPrint('GattMeshClient.sendGroupMessage: no candidate characteristic discovered for ${device.remoteId}');
           await device.disconnect();
           continue;
         }
@@ -127,11 +325,81 @@ class GattMeshClient implements MeshClient {
         final cur = await char.read();
         final isOn = cur.isNotEmpty && cur.first == 0x01;
         final newVal = [isOn ? 0x00 : 0x01];
-        await char.write(newVal, withoutResponse: true);
+        final supportsWriteWithResponse = char.properties.write;
+        if (supportsWriteWithResponse) {
+          await char.write(newVal, withoutResponse: false);
+        } else {
+          await char.write(newVal, withoutResponse: true);
+        }
+        // Give device time to process and try to read back the new value if readable
+        try {
+          if (char.properties.read) {
+            await Future.delayed(const Duration(milliseconds: 150));
+            final check = await char.read();
+            if (kDebugMode) debugPrint('GattMeshClient.sendGroupMessage: write readback for ${device.remoteId} -> $check');
+          } else {
+            await Future.delayed(const Duration(milliseconds: 150));
+          }
+        } catch (_) {}
         await device.disconnect();
       } catch (_) {
         try { await device.disconnect(); } catch (_) {}
       }
+    }
+  }
+
+  @override
+  Future<bool> subscribeToDeviceCharacteristics(String macAddress, List<String> characteristicUuids, {Function(String mac, String uuid, List<int> value)? onNotify, bool allowScan = true}) async {
+    // BLE Mesh devices support GATT for battery (BAS), firmware updates (SMP), etc.
+    // This requires direct GATT connection to each device.
+    // NOTE: Battery is already available from advertisement manufacturer data,
+    // so GATT subscriptions are optional/for future enhancements
+    try {
+      final device = await _getDeviceByMac(macAddress, allowScan: false); // Don't scan - use cached only
+      if (device == null) {
+        if (kDebugMode) debugPrint('GattMeshClient.subscribeToDeviceCharacteristics: device $macAddress not in cache (skipping - battery from adverts)');
+        return false;
+      }
+      
+      // Check if already connected
+      final currentState = await device.connectionState.first.timeout(const Duration(milliseconds: 500));
+      if (currentState != BluetoothConnectionState.connected) {
+        if (kDebugMode) debugPrint('GattMeshClient.subscribeToDeviceCharacteristics: device $macAddress not connected (skipping - battery from adverts)');
+        return false;
+      }
+      
+      // Only subscribe if already connected (from a previous operation)
+      if (kDebugMode) debugPrint('GattMeshClient.subscribeToDeviceCharacteristics: discovering services for $macAddress');
+      final services = await device.discoverServices();
+      
+      // Subscribe to requested characteristics
+      bool anySubscribed = false;
+      for (final service in services) {
+        for (final char in service.characteristics) {
+          final charUuid = char.uuid.toString().toLowerCase();
+          if (characteristicUuids.any((uuid) => charUuid.contains(uuid.toLowerCase()))) {
+            if (char.properties.notify || char.properties.indicate) {
+              if (kDebugMode) debugPrint('GattMeshClient.subscribeToDeviceCharacteristics: subscribing to $charUuid for $macAddress');
+              await char.setNotifyValue(true);
+              anySubscribed = true;
+              
+              // Set up notification callback if provided
+              if (onNotify != null) {
+                char.lastValueStream.listen((value) {
+                  onNotify(macAddress, charUuid, value);
+                });
+              }
+            }
+          }
+        }
+      }
+      
+      if (kDebugMode && anySubscribed) debugPrint('GattMeshClient.subscribeToDeviceCharacteristics: subscribed for $macAddress');
+      return anySubscribed;
+    } catch (e) {
+      // Subscription failures are non-critical since battery comes from advertisements
+      if (kDebugMode) debugPrint('GattMeshClient.subscribeToDeviceCharacteristics: skipping $macAddress (battery from adverts): $e');
+      return false;
     }
   }
 }

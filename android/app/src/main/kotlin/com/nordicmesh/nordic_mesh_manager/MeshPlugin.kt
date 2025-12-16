@@ -19,6 +19,7 @@ import no.nordicsemi.android.mesh.MeshNetwork
 import no.nordicsemi.android.mesh.NetworkKey
 import no.nordicsemi.android.mesh.MeshStatusCallbacks
 import no.nordicsemi.android.mesh.transport.GenericOnOffSet
+import no.nordicsemi.android.mesh.transport.GenericOnOffGet
 import no.nordicsemi.android.mesh.transport.GenericOnOffStatus
 import no.nordicsemi.android.mesh.transport.MeshMessage
 import no.nordicsemi.android.mesh.provisionerstates.UnprovisionedMeshNode
@@ -65,6 +66,7 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             "isAvailable" -> result.success(true)
             "initialize" -> initialize(call, result)
             "setMeshCredentials" -> setMeshCredentials(call, result)
+            "ensureProxyConnection" -> ensureProxyConnectionCall(call, result)
             "connectToDevice" -> connectToDevice(call, result)
             "disconnectFromDevice" -> disconnectFromDevice(result)
             "triggerGroup" -> triggerGroup(call, result)
@@ -301,6 +303,18 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 result.success(true)
             } catch (e: Exception) {
                 result.error("CONNECTION_ERROR", e.message, null)
+            }
+        }
+    }
+
+    private fun ensureProxyConnectionCall(call: MethodCall, result: MethodChannel.Result) {
+        scope.launch {
+            try {
+                val mac = call.argument<String>("mac") ?: throw IllegalArgumentException("mac required")
+                val connected = ensureProxyConnection(mac)
+                result.success(connected)
+            } catch (e: Exception) {
+                result.error("PROXY_CONN_ERROR", e.message, null)
             }
         }
     }

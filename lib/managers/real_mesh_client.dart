@@ -367,6 +367,17 @@ class PlatformMeshClient implements MeshClient {
     } catch (_) { return false; }
   }
 
+  Future<bool> ensureProxyConnection(String macAddress) async {
+    if (!_available) return false;
+    try {
+      final res = await _channel.invokeMethod<bool>('ensureProxyConnection', {'mac': macAddress});
+      return res == true;
+    } catch (e) {
+      if (kDebugMode) debugPrint('PlatformMeshClient.ensureProxyConnection error: $e');
+      return false;
+    }
+  }
+
   Future<Map<String, dynamic>?> discoverServices(String macAddress) async {
     if (!_available) return null;
     try {

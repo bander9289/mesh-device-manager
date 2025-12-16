@@ -74,8 +74,13 @@ class _DevicesScreenState extends State<DevicesScreen> {
                                                 onChanged: (int? v) async {
                                                   if (v == null) { return; }
                                                   setState(() => _selectedGroupId = v);
-                                                  // Auto-subscribe to devices in the new selected group
-                                                  try { await context.read<DeviceManager>().subscribeGroupDevices(v, scanIfDisconnected: false); } catch (_) {}
+                                                  // Pre-connect to a proxy for the selected group, then subscribe devices
+                                                  try {
+                                                    final ok = await context.read<DeviceManager>().connectGroupProxy(v);
+                                                    if (!ok) {
+                                                      if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Failed to connect to group proxy')));
+                                                    }
+                                                  } catch (_) {}
                                                 },
                     );
                   },

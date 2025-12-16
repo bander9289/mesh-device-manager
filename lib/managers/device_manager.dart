@@ -466,29 +466,32 @@ class DeviceManager extends ChangeNotifier {
         await meshClient.sendGroupMessage(groupId, groupMemberMacs);
       }
       
-      // If native mesh plugin handled the PDU, optimistically toggle the group members
-      // BLE Mesh is command-based - we can't query state, so trust the command succeeded
+      // If native mesh plugin handled the PDU, do NOT optimistically toggle.
+      // Instead request discovery of group members and wait briefly for
+      // `GenericOnOffStatus` callbacks to arrive which will update device states.
       if (pluginHandled) {
-        if (kDebugMode) debugPrint('DeviceManager.triggerGroup: native mesh PDU sent, optimistically toggling ${groupMemberMacs.length} devices');
-        for (var i = 0; i < _devices.length; i++) {
-          final d = _devices[i];
-          if (groupMemberMacs.contains(d.macAddress)) {
-            _devices[i] = MeshDevice(
-              macAddress: d.macAddress,
-              identifier: d.identifier,
-              hardwareId: d.hardwareId,
-              batteryPercent: d.batteryPercent,
-              rssi: d.rssi,
-              version: d.version,
-              groupId: d.groupId,
-              lightOn: !(d.lightOn ?? false), // Toggle state
-            );
+        if (kDebugMode) debugPrint('DeviceManager.triggerGroup: native mesh PDU sent, awaiting status callbacks (no optimistic toggle)');
+            try {
+            if (meshClient is PlatformMeshClient) {
+            // After sending a group PDU, wait briefly for incoming GenericOnOffStatus
+            // callbacks which will update `_confirmedGroupMembers` via `_updateDeviceFromStatus`.
+            final deadline = DateTime.now().add(const Duration(seconds: 2));
+            while (DateTime.now().isBefore(deadline)) {
+              await Future.delayed(const Duration(milliseconds: 200));
+              final confirmed = _confirmedGroupMembers[groupId];
+              if (confirmed != null && confirmed.isNotEmpty) break;
+            }
+            final confirmed = _confirmedGroupMembers[groupId] ?? <String>{};
+            if (confirmed.isNotEmpty) {
+              if (kDebugMode) debugPrint('DeviceManager.triggerGroup: confirmed ${confirmed.length} members via status callbacks');
+              notifyListeners();
+              return confirmed.length;
+            }
           }
+        } catch (e) {
+          if (kDebugMode) debugPrint('DeviceManager.triggerGroup: error waiting for status callbacks -> $e');
         }
-        _confirmedGroupMembers[groupId] = groupMemberMacs.toSet();
-        notifyListeners();
-        if (kDebugMode) debugPrint('DeviceManager.triggerGroup: toggled ${groupMemberMacs.length} devices in group $groupId');
-        return groupMemberMacs.length;
+        // If we get here, no confirmations yet — continue to fallback probing below
       }
       
       // For fallback (GATT), check state changes
@@ -876,6 +879,71 @@ class DeviceManager extends ChangeNotifier {
     // keep the app scanning state as it was; do not start or stop scans here.
   }
 
+  /// Connect to a candidate proxy device for the given group so subsequent mesh
+  /// PDUs can be sent with low latency. Picks a candidate MAC from the group's
+  /// members and asks the native plugin to ensure a proxy connection.
+  Future<bool> connectGroupProxy(int groupId) async {
+    final candidates = _devices.where((d) => d.groupId == groupId).toList();
+    if (candidates.isEmpty) return false;
+    // prefer confirmed members if available
+    final confirmed = _confirmedGroupMembers[groupId];
+    String candidateMac = candidates.first.macAddress;
+    if (confirmed != null && confirmed.isNotEmpty) {
+      final found = candidates.firstWhere((d) => confirmed.contains(d.macAddress), orElse: () => candidates.first);
+      candidateMac = found.macAddress;
+    }
+
+    // Stop scanning to free BLE resources for connection
+    final wasScanning = isScanning;
+    if (wasScanning) {
+      stopScanning();
+      await Future.delayed(const Duration(milliseconds: 300));
+    }
+
+    bool connected = false;
+    try {
+      if (meshClient is PlatformMeshClient) {
+        final pm = meshClient as PlatformMeshClient;
+        if (kDebugMode) debugPrint('DeviceManager.connectGroupProxy: ensuring proxy connection to $candidateMac');
+        connected = await pm.ensureProxyConnection(candidateMac);
+      }
+    } catch (e) {
+      if (kDebugMode) debugPrint('DeviceManager.connectGroupProxy: error -> $e');
+      connected = false;
+    }
+
+    // Update device connection statuses for UI
+    for (final d in candidates) {
+      final idx = _devices.indexWhere((x) => x.macAddress == d.macAddress);
+      if (idx < 0) continue;
+      final newStatus = connected ? ConnectionStatus.connecting : ConnectionStatus.disconnected;
+      final cur = _devices[idx];
+      _devices[idx] = MeshDevice(
+        macAddress: cur.macAddress,
+        identifier: cur.identifier,
+        hardwareId: cur.hardwareId,
+        batteryPercent: cur.batteryPercent,
+        rssi: cur.rssi,
+        version: cur.version,
+        groupId: cur.groupId,
+        lightOn: cur.lightOn,
+        connectionStatus: newStatus,
+      );
+    }
+    notifyListeners();
+
+    if (connected) {
+      // Attempt subscription via plugin (no scan) to mark devices ready
+      try { await subscribeGroupDevices(groupId, scanIfDisconnected: false); } catch (_) {}
+    }
+
+    // restart scanning if it was running before
+    if (wasScanning) {
+      startBLEScanning(timeout: const Duration(seconds: 20));
+    }
+    return connected;
+  }
+
   /// Unsubscribe and close any plugin-managed subscriptions for the given MAC.
   Future<void> unsubscribeDeviceByMac(String mac) async {
     final normalized = mac.toLowerCase().replaceAll('-', ':');
@@ -936,6 +1004,13 @@ class DeviceManager extends ChangeNotifier {
         connectionStatus: device.connectionStatus,
       );
       notifyListeners();
+      // Mark this device as a confirmed member of its group (if assigned)
+      final deviceAfter = _devices[deviceIndex];
+      if (deviceAfter.groupId != null) {
+        final gid = deviceAfter.groupId!;
+        final set = _confirmedGroupMembers.putIfAbsent(gid, () => <String>{});
+        set.add(deviceAfter.macAddress);
+      }
     } else {
       if (kDebugMode) {
         debugPrint('DeviceManager: No device found with unicast 0x${unicastAddress.toRadixString(16)}');

@@ -90,8 +90,7 @@ class DeviceManager extends ChangeNotifier {
     meshClient = platformClient;
     
     // Set up callback to receive GenericOnOffStatus messages from devices
-    if (platformClient is PlatformMeshClient) {
-      platformClient.setDeviceStatusCallback((unicastAddress, state, targetState) {
+    platformClient.setDeviceStatusCallback((unicastAddress, state, targetState) {
         if (kDebugMode) {
           debugPrint('DeviceManager: Status from device 0x${unicastAddress.toRadixString(16)}: state=$state');
         }
@@ -99,7 +98,6 @@ class DeviceManager extends ChangeNotifier {
         _updateDeviceFromStatus(unicastAddress, state);
         notifyListeners();
       });
-    }
     
     if (kDebugMode) {
       debugPrint('DeviceManager: Using PlatformMeshClient with GattMeshClient fallback');
@@ -904,8 +902,13 @@ class DeviceManager extends ChangeNotifier {
     try {
       if (meshClient is PlatformMeshClient) {
         final pm = meshClient as PlatformMeshClient;
-        if (kDebugMode) debugPrint('DeviceManager.connectGroupProxy: ensuring proxy connection to $candidateMac');
-        connected = await pm.ensureProxyConnection(candidateMac);
+        // Gather all device unicast addresses to configure proxy filter
+        final allUnicasts = _devices
+            .where((d) => d.unicastAddress > 0)
+            .map((d) => d.unicastAddress)
+            .toList();
+        if (kDebugMode) debugPrint('DeviceManager.connectGroupProxy: ensuring proxy connection to $candidateMac with ${allUnicasts.length} devices');
+        connected = await pm.ensureProxyConnection(candidateMac, deviceUnicasts: allUnicasts);
       }
     } catch (e) {
       if (kDebugMode) debugPrint('DeviceManager.connectGroupProxy: error -> $e');

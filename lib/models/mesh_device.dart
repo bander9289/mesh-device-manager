@@ -35,9 +35,9 @@ class MeshDevice {
       // Get last 2 bytes (indices 4 and 5)
       final byte4 = int.parse(parts[4], radix: 16);
       final byte5 = int.parse(parts[5], radix: 16);
-      
-      // Combine in little-endian order and mask to valid range
-      int addr = (byte5 << 8) | byte4;
+
+      // Combine in big-endian order (no byte-swap): high=parts[4], low=parts[5]
+      int addr = (byte4 << 8) | byte5;
       addr &= 0x7FFF; // Keep in valid unicast range 0x0001-0x7FFF
       
       // If result is 0, default to 0x0001

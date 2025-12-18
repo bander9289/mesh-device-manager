@@ -142,7 +142,7 @@ class _DeviceDetailsScreenState extends State<DeviceDetailsScreen> {
           final b = battery[widget.device.macAddress] ?? -1;
           if (mounted) setState(() => _battery = b);
           // gather services via plugin
-          final pm = client as PlatformMeshClient;
+          final pm = client;
           final isConnected = await pm.isDeviceConnectedNative(widget.device.macAddress);
           if (isConnected) {
             Map<String, dynamic>? servicesMap;
@@ -397,7 +397,7 @@ class _DeviceDetailsScreenState extends State<DeviceDetailsScreen> {
               final res = await pm.readCharacteristic(widget.device.macAddress, c['uuid']);
               if (kDebugMode) debugPrint('Plugin read ${c['uuid']} -> $res');
               if (res != null && res.isNotEmpty) {
-                final v = (res[0] as int) & 0xff;
+                final v = res[0] & 0xff;
                 if (c['uuid'].toLowerCase().contains('2a19')) {
                   setState(() => _battery = v);
                   try { _dm.updateDeviceState(widget.device.macAddress, batteryPercent: v); } catch (_) {}
@@ -409,7 +409,7 @@ class _DeviceDetailsScreenState extends State<DeviceDetailsScreen> {
             try {
               final pm = _dm.meshClient as PlatformMeshClient;
               final res = await pm.readCharacteristic(widget.device.macAddress, c['uuid']);
-              final cur = (res != null && res.isNotEmpty) ? (res[0] as int) : 0;
+              final cur = (res != null && res.isNotEmpty) ? res[0] : 0;
               final newVal = [cur == 1 ? 0 : 1];
               await pm.writeCharacteristic(widget.device.macAddress, c['uuid'], newVal, withResponse: true);
               await Future.delayed(const Duration(milliseconds: 150));

@@ -23,9 +23,6 @@ class GattMeshClient implements MeshClient {
 
   GattMeshClient({required this.deviceProvider, this.fallback, this.isAppScanning});
 
-  // Track active subscriptions per device MAC -> characteristic uuid -> stream subscription
-  final Map<String, Map<String, StreamSubscription<List<int>>>> _activeSubscriptions = {};
-
   @override
   Future<void> initialize(Map<String, String>? credentials) async {
     // GATT approach doesn't need mesh keys but store if needed by fallback

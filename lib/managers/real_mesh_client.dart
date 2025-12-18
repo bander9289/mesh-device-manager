@@ -184,12 +184,12 @@ class PlatformMeshClient implements MeshClient {
       final out = <String, int>{};
       res.forEach((k, v) {
         try {
-          final normalized = (k as String).toLowerCase().replaceAll('-', ':');
-          final battery = (v as int);
-          out[k as String] = battery;
+          final normalized = k.toLowerCase().replaceAll('-', ':');
+          final battery = v as int;
+          out[k] = battery;
           _deviceBatteryLevels[normalized] = battery;
         } catch (_) {
-          out[k as String] = 0;
+          out[k] = 0;
         }
       });
       // if the plugin returns no useful data (all zeros), use cached or fallback
@@ -367,13 +367,33 @@ class PlatformMeshClient implements MeshClient {
     } catch (_) { return false; }
   }
 
-  Future<bool> ensureProxyConnection(String macAddress) async {
+  Future<bool> ensureProxyConnection(String macAddress, {List<int>? deviceUnicasts}) async {
     if (!_available) return false;
     try {
-      final res = await _channel.invokeMethod<bool>('ensureProxyConnection', {'mac': macAddress});
+      final params = <String, dynamic>{'mac': macAddress};
+      if (deviceUnicasts != null && deviceUnicasts.isNotEmpty) {
+        params['deviceUnicasts'] = deviceUnicasts;
+      }
+      final res = await _channel.invokeMethod<bool>('ensureProxyConnection', params);
       return res == true;
     } catch (e) {
       if (kDebugMode) debugPrint('PlatformMeshClient.ensureProxyConnection error: $e');
+      return false;
+    }
+  }
+  
+  /// Configure proxy filter to receive status messages from specific devices.
+  /// CRITICAL: This must be called after connecting to proxy, otherwise status messages are dropped.
+  Future<bool> configureProxyFilter(List<int> deviceUnicasts) async {
+    if (!_available) return false;
+    try {
+      final res = await _channel.invokeMethod<bool>('configureProxyFilter', {
+        'deviceUnicasts': deviceUnicasts,
+      });
+      if (kDebugMode) debugPrint('PlatformMeshClient.configureProxyFilter: configured for ${deviceUnicasts.length} devices');
+      return res == true;
+    } catch (e) {
+      if (kDebugMode) debugPrint('PlatformMeshClient.configureProxyFilter error: $e');
       return false;
     }
   }

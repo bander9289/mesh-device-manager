@@ -463,7 +463,6 @@ class DeviceListTile extends StatelessWidget {
         statusIcon = Icon(Icons.battery_std, color: batteryColor);
         break;
       case ConnectionStatus.disconnected:
-      default:
         statusIcon = const Icon(Icons.battery_std, color: Colors.grey);
         break;
     }

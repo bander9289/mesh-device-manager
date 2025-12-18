@@ -22,6 +22,10 @@ import no.nordicsemi.android.mesh.transport.GenericOnOffSet
 import no.nordicsemi.android.mesh.transport.GenericOnOffGet
 import no.nordicsemi.android.mesh.transport.GenericOnOffStatus
 import no.nordicsemi.android.mesh.transport.MeshMessage
+import no.nordicsemi.android.mesh.transport.ProxyConfigSetFilterType
+import no.nordicsemi.android.mesh.transport.ProxyConfigAddAddressToFilter
+import no.nordicsemi.android.mesh.utils.ProxyFilterType
+import no.nordicsemi.android.mesh.utils.AddressArray
 import no.nordicsemi.android.mesh.provisionerstates.UnprovisionedMeshNode
 import java.util.UUID
 import kotlin.random.Random
@@ -43,6 +47,8 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
     private var meshNetwork: MeshNetwork? = null
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var isConnected = false
+    private var proxyFilterConfigured = false
+    private var currentProxyUnicast: Int? = null
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         context = binding.applicationContext
@@ -83,6 +89,8 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             "setNotify" -> setNotify(call, result)
             "discoverGroupMembers" -> discoverGroupMembers(call, result)
             "sendUnicastMessage" -> sendUnicastMessage(call, result)
+            "configureProxyFilter" -> configureProxyFilter(call, result)
+            "resetMeshNetwork" -> resetMeshNetwork(result)
             else -> result.notImplemented()
         }
     }
@@ -215,52 +223,35 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
 
             meshNetwork?.let { network ->
                 // Ensure mesh network keys match provided credentials.
-                // Minimized logging: only warn/errors emitted below.
+                // Important: Don't remove/re-add keys if they already match - this preserves sequence numbers
 
-                // Force-replace existing application keys first (unbinds app keys from net keys)
-                if (network.appKeys.isNotEmpty()) {
-                    android.util.Log.w("MeshPlugin", "meshNetwork has existing appKeys - removing before replacing keys")
-                    val existingAppKeys = network.appKeys.toList()
-                    existingAppKeys.forEach { ak ->
-                        try {
-                            network.removeAppKey(ak)
-                            android.util.Log.d("MeshPlugin", "Removed existing appKey: $ak")
-                        } catch (e: Exception) {
-                            android.util.Log.w("MeshPlugin", "Failed to remove appKey via API: ${e.message}")
-                        }
-                    }
+                val netKeyToAdd = NetworkKey(0, netKeyBytes)
+                val appKeyToAdd = ApplicationKey(0, appKeyBytes)
+
+                // Check if network key already exists and matches
+                val existingNetKey = network.netKeys.firstOrNull { it.keyIndex == 0 }
+                if (existingNetKey == null) {
+                    network.addNetKey(netKeyToAdd)
+                    android.util.Log.d("MeshPlugin", "Added Network Key to meshNetwork")
+                } else if (!existingNetKey.key.contentEquals(netKeyBytes)) {
+                    android.util.Log.w("MeshPlugin", "Network key mismatch - updating")
+                    network.removeNetKey(existingNetKey)
+                    network.addNetKey(netKeyToAdd)
+                } else {
+                    android.util.Log.d("MeshPlugin", "Network key already configured correctly")
                 }
 
-                // Now remove existing network keys
-                if (network.netKeys.isNotEmpty()) {
-                    android.util.Log.w("MeshPlugin", "meshNetwork has existing netKeys - removing before adding provided key")
-                    val existingNetKeys = network.netKeys.toList()
-                    existingNetKeys.forEach { nk ->
-                        try {
-                            network.removeNetKey(nk)
-                            android.util.Log.d("MeshPlugin", "Removed existing netKey: $nk")
-                        } catch (e: Exception) {
-                            android.util.Log.w("MeshPlugin", "Failed to remove netKey via API: ${e.message}")
-                        }
-                    }
-                }
-
-                // Add provided network key
-                try {
-                    val netKey = NetworkKey(0, netKeyBytes)
-                    network.addNetKey(netKey)
-                    android.util.Log.d("MeshPlugin", "Added provided Network Key to meshNetwork")
-                } catch (e: Exception) {
-                    android.util.Log.e("MeshPlugin", "Failed to add provided Network Key: ${e.message}")
-                }
-
-                // Add provided application key
-                try {
-                    val appKey = ApplicationKey(0, appKeyBytes)
-                    network.addAppKey(appKey)
-                    android.util.Log.d("MeshPlugin", "Added provided Application Key to meshNetwork")
-                } catch (e: Exception) {
-                    android.util.Log.e("MeshPlugin", "Failed to add provided Application Key: ${e.message}")
+                // Check if app key already exists and matches
+                val existingAppKey = network.appKeys.firstOrNull { it.keyIndex == 0 }
+                if (existingAppKey == null) {
+                    network.addAppKey(appKeyToAdd)
+                    android.util.Log.d("MeshPlugin", "Added Application Key to meshNetwork")
+                } else if (!existingAppKey.key.contentEquals(appKeyBytes)) {
+                    android.util.Log.w("MeshPlugin", "Application key mismatch - updating")
+                    network.removeAppKey(existingAppKey)
+                    network.addAppKey(appKeyToAdd)
+                } else {
+                    android.util.Log.d("MeshPlugin", "Application key already configured correctly")
                 }
 
                 // Programmatically add group 0xC000 if it doesn't exist
@@ -270,6 +261,13 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                         val defaultGroup = network.createGroup(provisioner, 0xC000, "Default")
                         android.util.Log.d("MeshPlugin", "Created group 0xC000 (Default)")
                     }
+                }
+
+                // Log current sequence number status (for debugging)
+                val provisioner = network.selectedProvisioner ?: network.provisioners.firstOrNull()
+                provisioner?.provisionerAddress?.let { provisionerAddress ->
+                    val currentSeq = network.sequenceNumbers.get(provisionerAddress, 0)
+                    android.util.Log.i("MeshPlugin", "Provisioner (0x${provisionerAddress.toString(16)}) current sequence: $currentSeq (managed by Nordic SDK)")
                 }
 
                 android.util.Log.d("MeshPlugin", "Mesh network configured: nodes=${network.nodes.size}, groups=${network.groups.size}")
@@ -311,7 +309,15 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         scope.launch {
             try {
                 val mac = call.argument<String>("mac") ?: throw IllegalArgumentException("mac required")
+                val deviceUnicasts = call.argument<List<Int>>("deviceUnicasts") ?: emptyList()
                 val connected = ensureProxyConnection(mac)
+                
+                if (connected && deviceUnicasts.isNotEmpty()) {
+                    // Configure proxy filter after connection
+                    android.util.Log.d("MeshPlugin", "Configuring proxy filter for ${deviceUnicasts.size} devices")
+                    configureProxyFilterInternal(deviceUnicasts)
+                }
+                
                 result.success(connected)
             } catch (e: Exception) {
                 result.error("PROXY_CONN_ERROR", e.message, null)
@@ -327,6 +333,21 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         
         android.util.Log.d("MeshPlugin", "Connecting to proxy: $macAddress")
         val normalizedMac = macAddress.uppercase().replace("-", ":")
+        
+        // Calculate unicast address from MAC (last 2 bytes)
+        try {
+            val macParts = normalizedMac.split(":")
+            if (macParts.size == 6) {
+                val byte4 = macParts[4].toInt(16)
+                val byte5 = macParts[5].toInt(16)
+                var unicast = (byte5 shl 8) or byte4
+                unicast = unicast and 0x7FFF
+                currentProxyUnicast = if (unicast == 0) 0x0001 else unicast
+                android.util.Log.d("MeshPlugin", "Calculated proxy unicast: 0x${currentProxyUnicast?.toString(16)}")
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("MeshPlugin", "Failed to calculate unicast from MAC: ${e.message}")
+        }
         val bluetoothAdapter = android.bluetooth.BluetoothAdapter.getDefaultAdapter()
         val device = bluetoothAdapter.getRemoteDevice(normalizedMac)
         
@@ -359,6 +380,9 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             try {
                 bleManager?.disconnect()?.enqueue()
                 bleManager = null
+                isConnected = false
+                proxyFilterConfigured = false
+                currentProxyUnicast = null
                 result.success(true)
             } catch (e: Exception) {
                 result.error("DISCONNECT_ERROR", e.message, null)
@@ -531,6 +555,105 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         }
     }
     
+    private fun configureProxyFilter(call: MethodCall, result: MethodChannel.Result) {
+        scope.launch {
+            try {
+                val deviceUnicasts = call.argument<List<Int>>("deviceUnicasts")
+                    ?: throw IllegalArgumentException("deviceUnicasts required")
+                
+                configureProxyFilterInternal(deviceUnicasts)
+                result.success(true)
+            } catch (e: Exception) {
+                android.util.Log.e("MeshPlugin", "configureProxyFilter error: ${e.message}", e)
+                result.error("FILTER_CONFIG_ERROR", e.message, null)
+            }
+        }
+    }
+    
+    /**
+     * Configure the proxy filter to forward status messages for specific device unicast addresses.
+     * This is CRITICAL - without this, the proxy drops all incoming status messages.
+     */
+    private fun configureProxyFilterInternal(deviceUnicasts: List<Int>) {
+        if (!isConnected) {
+            android.util.Log.w("MeshPlugin", "Cannot configure filter: not connected to proxy")
+            return
+        }
+        
+        if (proxyFilterConfigured) {
+            android.util.Log.d("MeshPlugin", "Proxy filter already configured")
+            return
+        }
+        
+        try {
+            // Find the proxy node in the mesh network
+            val proxyNode = meshNetwork?.nodes?.firstOrNull { node ->
+                // The proxy is the device we're currently connected to
+                // We need to match it by unicast address
+                currentProxyUnicast?.let { it == node.unicastAddress } ?: false
+            }
+            
+            if (proxyNode == null) {
+                // If we can't find proxy node by unicast, try to use the first node
+                // or create a lightweight node entry for the proxy
+                android.util.Log.w("MeshPlugin", "Proxy node not found in network, attempting filter config anyway")
+                
+                // We'll send the config messages to the proxy's presumed unicast address
+                // Extract from the current BLE connection if possible
+                val targetUnicast = currentProxyUnicast ?: 0x0001
+                
+                // Step 1: Set filter type to WHITELIST (INCLUSION_LIST)
+                meshNetwork?.appKeys?.firstOrNull()?.let { appKey ->
+                    val filterSetup = ProxyConfigSetFilterType(ProxyFilterType(ProxyFilterType.INCLUSION_LIST_FILTER))
+                    meshManagerApi.createMeshPdu(targetUnicast, filterSetup)
+                    android.util.Log.d("MeshPlugin", "Sent ProxyConfigSetFilterType(INCLUSION_LIST) to 0x${targetUnicast.toString(16)}")
+                }
+                
+                // Step 2: Add device addresses in batches (max ~10 per message)
+                val batches = deviceUnicasts.chunked(10)
+                for (batch in batches) {
+                    val addressList = batch.map { addr ->
+                        val b1 = ((addr shr 8) and 0xFF).toByte()
+                        val b2 = (addr and 0xFF).toByte()
+                        AddressArray(b1, b2)
+                    }
+                    val addAddresses = ProxyConfigAddAddressToFilter(addressList)
+                    meshManagerApi.createMeshPdu(targetUnicast, addAddresses)
+                    android.util.Log.d("MeshPlugin", "Added ${batch.size} addresses to filter: ${batch.map { "0x" + it.toString(16) }.joinToString(", ")}")
+                }
+            } else {
+                // Found proxy node - use it
+                val targetUnicast = proxyNode.unicastAddress
+                android.util.Log.d("MeshPlugin", "Configuring filter on proxy node: ${proxyNode.nodeName} (0x${targetUnicast.toString(16)})")
+                
+                // Step 1: Set filter type to WHITELIST (INCLUSION_LIST)
+                val filterSetup = ProxyConfigSetFilterType(ProxyFilterType(ProxyFilterType.INCLUSION_LIST_FILTER))
+                meshManagerApi.createMeshPdu(targetUnicast, filterSetup)
+                android.util.Log.d("MeshPlugin", "Sent ProxyConfigSetFilterType(INCLUSION_LIST)")
+                
+                // Step 2: Add device addresses in batches
+                val batches = deviceUnicasts.chunked(10)
+                for (batch in batches) {
+                    val addressList = batch.map { addr ->
+                        val b1 = ((addr shr 8) and 0xFF).toByte()
+                        val b2 = (addr and 0xFF).toByte()
+                        AddressArray(b1, b2)
+                    }
+                    val addAddresses = ProxyConfigAddAddressToFilter(addressList)
+                    meshManagerApi.createMeshPdu(targetUnicast, addAddresses)
+                    android.util.Log.d("MeshPlugin", "Added ${batch.size} addresses to filter: ${batch.map { "0x" + it.toString(16) }.joinToString(", ")}")
+                }
+            }
+            
+            proxyFilterConfigured = true
+            android.util.Log.i("MeshPlugin", "✓ Proxy filter configured for ${deviceUnicasts.size} devices")
+            
+        } catch (e: Exception) {
+            android.util.Log.e("MeshPlugin", "Failed to configure proxy filter", e)
+            proxyFilterConfigured = false
+        }
+    }
+    
     private fun sendUnicastMessage(call: MethodCall, result: MethodChannel.Result) {
         scope.launch {
             try {
@@ -568,6 +691,31 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 android.util.Log.e("MeshPlugin", "sendUnicastMessage error: ${e.message}", e)
                 result.error("UNICAST_ERROR", e.message, null)
             }
+        }
+    }
+
+    /**
+     * Reset mesh network to clear replay protection issues.
+     * 
+     * IMPORTANT: This is a nuclear option. The proper BLE Mesh way is:
+     * 1. Let the Nordic SDK manage sequence numbers automatically (persisted to DB)
+     * 2. If devices are rejecting messages, perform an IV Index update (network-wide operation)
+     * 3. Only use this reset if you need to completely start over
+     * 
+     * This will:
+     * - Clear all mesh network state
+     * - Reset sequence numbers to 0
+     * - Require re-provisioning all devices
+     */
+    private fun resetMeshNetwork(result: MethodChannel.Result) {
+        try {
+            android.util.Log.w("MeshPlugin", "Resetting mesh network - all state will be lost!")
+            meshManagerApi.resetMeshNetwork()
+            meshNetwork = meshManagerApi.meshNetwork
+            result.success(true)
+        } catch (e: Exception) {
+            android.util.Log.e("MeshPlugin", "Failed to reset mesh network", e)
+            result.error("RESET_ERROR", e.message, null)
         }
     }
 

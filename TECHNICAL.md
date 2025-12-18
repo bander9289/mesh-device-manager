@@ -23,7 +23,7 @@ The Nordic BLE Mesh Manager is a cross-platform mobile application built with Fl
 
 ## 2. System Architecture
 
-### 2.1 High-Level Architecture
+### 2.1 High-Level Architecture (UPDATED)
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -38,13 +38,23 @@ The Nordic BLE Mesh Manager is a cross-platform mobile application built with Fl
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │
 │  │ Device State │  │ Firmware Mgr │  │ Group Manager│  │
 │  │   Manager    │  │              │  │              │  │
+│  │              │  │              │  │              │  │
+│  │ ┌──────────┐ │  │              │  │              │  │
+│  │ │ Scan/    │ │  │              │  │              │  │
+│  │ │ Connect  │ │  │              │  │              │  │
+│  │ │ State    │ │  │              │  │              │  │
+│  │ │ Machine  │ │  │              │  │              │  │
+│  │ └──────────┘ │  │              │  │              │  │
 │  └──────────────┘  └──────────────┘  └──────────────┘  │
 └────────────────────────┬────────────────────────────────┘
                          │
 ┌────────────────────────▼────────────────────────────────┐
 │                    Service Layer                        │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │
-│  │  Mesh Client │  │  BAS Client  │  │  SMP Client  │  │
+│  │  Mesh Proxy  │  │  BAS Client  │  │  SMP Client  │  │
+│  │  Manager     │  │              │  │              │  │
+│  │  + Proxy     │  │              │  │              │  │
+│  │    Filter    │  │              │  │              │  │
 │  └──────────────┘  └──────────────┘  └──────────────┘  │
 └────────────────────────┬────────────────────────────────┘
                          │
@@ -61,39 +71,216 @@ The Nordic BLE Mesh Manager is a cross-platform mobile application built with Fl
 │  ┌──────────────┐              ┌──────────────┐        │
 │  │   Android    │              │     iOS      │        │
 │  │  BLE Stack   │              │  CoreBluetooth│       │
+│  │  + Nordic    │              │  + Nordic    │        │
+│  │    Mesh SDK  │              │    Mesh SDK  │        │
 │  └──────────────┘              └──────────────┘        │
 └─────────────────────────────────────────────────────────┘
 ```
 
 ### 2.2 Data Flow
 
-#### Device Discovery Flow
+#### **NEW: Startup and Discovery Flow (Background Scanning Architecture)**
+
 ```
-1. App starts → Request permissions
-2. Initialize BLE scanning (continuous)
-3. Filter advertisements by service UUID (mesh provisioning service)
-4. Parse advertisement data:
-   - Extract device address (MAC)
-   - Parse advertising name: <hardware_id>-major.minor.revision-hash
-   - Identify group membership (from mesh composition data)
-     - Note: Groups are not prepopulated in the app and are created by the user via multi-select. The first group created uses mesh group address 0xC000 and is labeled "Default".
-5. Connect to device (on demand) for:
-   - Battery level (BAS characteristic read)
-   - Additional mesh configuration data
-6. Update device state in StateManager
-7. Notify UI to refresh device list
-8. Per-Device details: The app provides a Device Details view for per-device diagnostics showing derived & discovered services and characteristics, allowing manual reads, writes, and subscriptions for quick debug and mapping of vendor-specific controls.
+1. App Launch
+   ↓
+2. Initialize Nordic Mesh SDK with credentials
+   ↓
+3. Request BLE permissions
+   ↓
+4. Start CONTINUOUS BLE scanning
+   - Filter: Service UUID 0x1828 (Mesh Proxy) AND name starts with "KMv"
+   - Mode: Foreground scanning (background on iOS is limited)
+   - Updates device list in real-time
+   ↓
+5. First Device Discovered → TRIGGER PROXY CONNECTION
+   ↓
+6. PAUSE scanning (BLE can't scan + connect simultaneously)
+   ↓
+7. Connect to first device as Mesh Proxy
+   - Connect GATT
+   - Discover Mesh Proxy Service (0x1828)
+   - Enable notifications on Proxy Data Out (0x2ADE)
+   - Configure Proxy Filter with ALL discovered device unicast addresses
+   ↓
+8. Send GenericOnOffGet to DEFAULT group (0xC000)
+   - Wait for GenericOnOffStatus responses
+   - Parse unicast addresses from status messages
+   - Map unicast → MAC using MeshDevice.unicastAddress formula
+   - Update device.groupId for responders
+   ↓
+9. DISCONNECT from proxy
+   ↓
+10. RESUME scanning to discover more devices
+    ↓
+11. User creates additional groups → store in SharedPreferences
+    ↓
+12. User triggers group → RECONNECT to proxy, send message, DISCONNECT
+    ↓
+13. Loop: Scan → Discover → Connect → Query → Disconnect → Scan
 ```
 
-#### Group Trigger Flow
+#### **Critical Proxy Filter Configuration (MISSING in current implementation)**
+
+```kotlin
+// After connecting to proxy, MUST configure proxy filter to forward messages
+// for all known device unicast addresses:
+
+fun configureProxyFilter(deviceUnicasts: List<Int>) {
+    val filterSetup = ConfigProxyFilterSetup(
+        filterType = ProxyFilterType.WHITELIST
+    )
+    meshManagerApi.sendConfigProxyFilterSetup(proxyNode, filterSetup)
+    
+    // Add each device unicast to the filter
+    for (unicast in deviceUnicasts) {
+        val addAddress = ConfigProxyFilterAddAddress(
+            listOf(unicast)  // Add device to whitelist
+        )
+        meshManagerApi.sendConfigProxyFilterAddAddress(proxyNode, addAddress)
+    }
+}
 ```
-1. User taps "Trigger All" button
-2. UI calls GroupManager.triggerGroup(groupId)
-3. GroupManager creates Generic OnOff Set message
-4. Message targeted to group address
-5. MeshClient sends message via mesh network
-6. UI displays confirmation/error
-7. When devices receive a trigger, the app polls per-device OnOff state and displays a small spinner next to the battery indicator for devices that are currently "on"; spinners are cleared when the device returns to "off".
+
+**Why this is critical:**
+- Without proxy filter configuration, the proxy forwards NOTHING except beacons
+- Your log shows: "Received 23 bytes from proxy" → this is ONLY the beacon, no status messages
+- GenericOnOffStatus messages are being sent by devices but proxy drops them
+- Nordic SDK creates/sends the PDU correctly, but responses are filtered out
+
+#### Device Discovery Flow (UPDATED)
+```
+1. App starts → Request permissions
+2. Initialize BLE scanning (CONTINUOUS, foreground)
+3. Filter advertisements by:
+   a. Service UUID contains 0x1828 (Mesh Proxy)
+   b. AND advertising name starts with "KMv"
+   c. Parse name: "KMv<hardware_id>-major.minor.revision-hash"
+4. For each matching advertisement:
+   - Extract MAC address
+   - Calculate unicast address from MAC (last 2 bytes)
+   - Parse hardware ID and version from name
+   - Extract battery level from manufacturer data (if present)
+   - Add/update device in StateManager
+5. Update UI device list in real-time
+6. Devices remain in list while being advertised (no timeout)
+7. REMOVED: Per-device connection for battery (use advertisement data instead)
+8. REMOVED: Persistent device storage (always dynamic discovery)
+```
+
+**Advertisement Filtering Logic:**
+```dart
+bool _isKantmissDevice(ScanResult r) {
+  // BOTH conditions must be met:
+  // 1. Has Mesh Proxy Service
+  final uuids = r.advertisementData.serviceUuids
+    .map((u) => u.toString().toLowerCase());
+  final hasMeshService = uuids.any((u) => 
+    u.contains('1828') || u == '00001828-0000-1000-8000-00805f9b34fb'
+  );
+  
+  // 2. Name starts with "KMv"
+  final name = r.advertisementData.advName.isNotEmpty 
+    ? r.advertisementData.advName 
+    : r.device.platformName;
+  final hasKmPrefix = name.toLowerCase().startsWith('kmv');
+  
+  return hasMeshService && hasKmPrefix;
+}
+```
+
+#### Group Discovery Flow (NEW)
+```
+1. User opens app → scanning discovers devices
+2. First device found → automatically trigger group discovery
+3. PAUSE scanning
+4. Connect to first device as mesh proxy:
+   a. Connect GATT to device
+   b. Discover Mesh Proxy Service (0x1828)
+   c. Enable notifications on Proxy Data Out (0x2ADE)
+   d. Configure Proxy Filter:
+      - Set filter type: WHITELIST
+      - Add ALL discovered device unicast addresses
+      - This allows proxy to forward status messages
+5. Send GenericOnOffGet to DEFAULT group (0xC000):
+   - Opcode: 0x8201 (Generic OnOff Get)
+   - Destination: 0xC000 (group address)
+   - Expected response: GenericOnOffStatus from each group member
+6. Wait 2-3 seconds for responses
+7. Process GenericOnOffStatus messages:
+   - Extract source unicast address from each status
+   - Match unicast to device using unicastAddress calculation
+   - Set device.groupId = 0xC000 for responders
+   - Update UI to show group membership
+8. DISCONNECT from proxy
+9. RESUME scanning
+10. UI now shows devices filtered by Default group
+```
+
+**Proxy Filter Configuration (CRITICAL):**
+```kotlin
+// In MeshPlugin.kt after proxy connection established:
+
+private fun configureProxyFilterForDevices(devices: List<Int>) {
+    val proxyNode = meshNetwork.nodes.firstOrNull { 
+        it.bluetoothAddress == currentProxyMac 
+    } ?: return
+    
+    // 1. Set filter type to WHITELIST
+    val filterSetup = ConfigProxyFilterSetup(
+        ProxyFilterType.WHITELIST_FILTER
+    )
+    meshManagerApi.createMeshPdu(proxyNode.unicastAddress, filterSetup)
+    
+    // 2. Add all device unicast addresses
+    val addAddresses = ConfigProxyFilterAddAddress(devices)
+    meshManagerApi.createMeshPdu(proxyNode.unicastAddress, addAddresses)
+    
+    Log.d(TAG, "Configured proxy filter for ${devices.size} devices")
+}
+
+// Call this after proxy connection in ensureProxyConnection():
+override fun onDeviceReady(device: BluetoothDevice) {
+    super.onDeviceReady(device)
+    val deviceUnicasts = getKnownDeviceUnicasts() // from Dart
+    configureProxyFilterForDevices(deviceUnicasts)
+}
+```
+
+#### Group Trigger Flow (UPDATED)
+```
+1. User selects group and taps "Trigger All" button
+2. PAUSE scanning (critical - can't scan while connected)
+3. Connect to mesh proxy:
+   a. Pick first device in group as proxy (prefer last used)
+   b. Connect GATT
+   c. Configure proxy filter with all device unicasts
+4. Create GenericOnOffSet message:
+   - Opcode: 0x8202 (Generic OnOff Set Acknowledged)
+   - Destination: group address (e.g., 0xC000)
+   - State: Toggle current state or set to ON
+   - TID: Increment transaction counter
+5. Send via Nordic SDK → meshManagerApi.createMeshPdu()
+6. Nordic SDK encrypts and segments PDU
+7. Write PDU to Proxy Data In characteristic (0x2ADD)
+8. Proxy broadcasts to mesh network
+9. Wait for GenericOnOffStatus responses:
+   - Read from Proxy Data Out notifications (0x2ADE)
+   - Nordic SDK decrypts and parses
+   - Extract source unicast from each status
+   - Confirm group membership
+   - Update device.lightOn state
+10. DISCONNECT from proxy (important - free BLE resources)
+11. RESUME scanning
+12. UI displays confirmation with count of responding devices
+```
+
+**Why Disconnect After Each Operation:**
+- BLE stack cannot scan while maintaining connection on most platforms
+- Frees resources for other operations
+- Prevents stale connections
+- Allows proxy device to be discovered by other apps
+- Connection is fast (~1-2 seconds) so reconnecting is acceptable
 ```
 
 #### Firmware Update Flow

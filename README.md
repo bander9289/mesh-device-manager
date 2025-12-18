@@ -24,19 +24,24 @@ Nordic BLE Mesh Manager provides field technicians and administrators with an ef
 ## ✨ Key Features
 
 ### Device Management
-- Continuous device discovery with real-time updates
+- **Continuous foreground scanning** for real-time device discovery
+- **Strict filtering**: Only Kantmiss devices (0x1828 service + "KMv" name prefix)
+- **Automatic group discovery** on startup using GenericOnOffGet messages
 - Display devices organized by mesh group
 - Show device identifier (last 6 MAC nibbles)
-- Battery level indicators (green/orange/red)
+- Battery level from advertisements (green/orange/red)
 - Signal strength monitoring (RSSI)
- - Device On/Off Spinner: when a device is "On" the UI shows a small spinner near its battery indicator so you can quickly see which devices are currently active; the spinner clears when the device returns to "Off".
- - Device Details view: Short-press a device in the device list to open a Device Details view that shows advertised services, discovered characteristics, battery, and connection status. The view provides "Read Battery Now", "Toggle Candidate" and subscription options for testing per-device control and for debugging vendor-specific characteristics.
+- Device On/Off state from GenericOnOffStatus messages
+- Device Details view: diagnostics, services, characteristics, and manual control
 
 ### Group Operations
-- Filter devices by mesh group (groups are created by the user and start empty)
-- Trigger all devices in selected group (Nordic Mesh Light model)
-- Multi-select devices to move between groups or create a new one
-- Create Default group: the first created group uses address 0xC000 and is labeled "Default"
+- **Automatic discovery** of Default group (0xC000) on app startup
+- Filter devices by mesh group
+- **Dynamic proxy connection**: connect → trigger → disconnect workflow
+- Trigger all devices in selected group with GenericOnOffSet
+- Receive GenericOnOffStatus confirmations
+- Multi-select devices to move between groups
+- User-created groups (future: persistent storage)
 
 ### Firmware Updates
 - Load multiple firmware files for different hardware versions

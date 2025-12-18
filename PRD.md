@@ -46,29 +46,40 @@ Provide field technicians and administrators with a reliable, efficient tool for
 **Priority:** P0 (Must Have)
 
 #### Requirements
-- **FR-3.1.1:** Continuous BLE scanning while app is active
-- **FR-3.1.2:** Display only provisioned mesh devices (filter out unprovisioned)
-- **FR-3.1.3:** Organize devices by mesh group assignment
-- **FR-3.1.4:** Parse device advertising format: `<hardware_id>-major.minor.revision-hash`
-- **FR-3.1.5:** Display device identifier using last 6 MAC address nibbles
-- **FR-3.1.6:** No persistent device storage (dynamic discovery only)
+- **FR-3.1.1:** Continuous BLE scanning while app is in foreground (iOS background limitations)
+- **FR-3.1.2:** Filter devices by BOTH conditions:
+  - Has Mesh Proxy Service (UUID 0x1828)
+  - AND advertising name starts with "KMv"
+- **FR-3.1.3:** Parse device advertising format: `KMv<hardware_id>-major.minor.revision-hash`
+- **FR-3.1.4:** Extract battery level from manufacturer data in advertisements
+- **FR-3.1.5:** Calculate device unicast address from MAC (last 2 bytes)
+- **FR-3.1.6:** Display device identifier using last 6 MAC address nibbles
+- **FR-3.1.7:** No persistent device storage (dynamic discovery only)
+- **FR-3.1.8:** Pause scanning when connecting to mesh proxy (BLE resource management)
 
 #### Non-Requirements
 - Provisioning of new devices
 - Displaying unprovisioned devices
+- Managing non-Kantmiss mesh devices
 - Historical device tracking
+- Background scanning on iOS
 
 ### 3.2 Group Management
 **Priority:** P0 (Must Have)
 
 #### Requirements
-- **FR-3.2.1:** Display dropdown selector showing discovered mesh groups; include an "Unknown" entry to list devices with no group assignment and default to the Default group (0xC000).
-- **FR-3.2.2:** Filter device list by selected group, but only after group membership has been confirmed (via trigger and observation). For the 'Unknown' selection, filter immediately to show devices with no group assignment.
-- **FR-3.2.3:** Support long-press multi-select for device group changes
-- **FR-3.2.4:** Transform group selector to "Move to [Group]" when devices selected
-- **FR-3.2.5:** Require confirmation before moving devices to new group
-- **FR-3.2.6:** Use hardcoded app key for group operations (not user-configurable)
-- **FR-3.2.7:** Single mesh network support (differentiated by group ID only)
+- **FR-3.2.1:** Automatic group discovery on app startup:
+  - On first device discovered, send GenericOnOffGet to Default group (0xC000)
+  - Parse GenericOnOffStatus responses to identify group members
+  - Auto-populate device.groupId for responders
+- **FR-3.2.2:** Display dropdown selector showing discovered mesh groups; include an "Unknown" entry to list devices with no group assignment and default to the Default group (0xC000)
+- **FR-3.2.3:** Filter device list by selected group immediately after group discovery completes
+- **FR-3.2.4:** Support long-press multi-select for device group changes
+- **FR-3.2.5:** Transform group selector to "Move to [Group]" when devices selected
+- **FR-3.2.6:** Require confirmation before moving devices to new group
+- **FR-3.2.7:** Use hardcoded app key for group operations (not user-configurable)
+- **FR-3.2.8:** Single mesh network support (differentiated by group ID only)
+- **FR-3.2.9:** Persistent storage of user-created groups (future enhancement)
 
 #### Mesh Credentials
 The following credentials must be hardcoded in the application:
@@ -82,10 +93,19 @@ The following credentials must be hardcoded in the application:
 
 #### Requirements
 - **FR-3.3.1:** "Trigger All" button visible when group selected
-- **FR-3.3.2:** Send Nordic Mesh Light group trigger message
+- **FR-3.3.2:** Dynamic proxy connection lifecycle:
+  - Pause scanning
+  - Connect to first device in group as proxy
+  - Configure proxy filter with all device unicast addresses
+  - Send GenericOnOffSet group message
+  - Wait for GenericOnOffStatus responses
+  - Disconnect from proxy
+  - Resume scanning
 - **FR-3.3.3:** Target all devices in currently selected group
-- **FR-3.3.4:** Provide visual feedback on trigger action
-- **FR-3.3.5:** Handle trigger failures gracefully with user notification
+- **FR-3.3.4:** Display count of responding devices (confirmed triggers)
+- **FR-3.3.5:** Provide visual feedback on trigger action (scanning paused, connecting, messaging)
+- **FR-3.3.6:** Handle trigger failures gracefully with user notification
+- **FR-3.3.7:** Trigger timeout: 3 seconds for status responses
 
 ### 3.4 Battery Monitoring
 **Priority:** P0 (Must Have)

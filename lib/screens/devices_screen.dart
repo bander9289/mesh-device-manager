@@ -16,6 +16,7 @@ class DevicesScreen extends StatefulWidget {
 
 class _DevicesScreenState extends State<DevicesScreen> {
   static const int _kUnknownGroupId = -1;
+  static const int _kDefaultGroupId = 0xC000;
   @override
   void initState() {
     super.initState();
@@ -28,8 +29,19 @@ class _DevicesScreenState extends State<DevicesScreen> {
       final ok = statuses.values.every((s) => s.isGranted || s.isLimited);
       if (ok) {
       if (kDebugMode) { debugPrint('Permissions ok — starting BLE scan'); }
-      dm.startBLEScanning(timeout: const Duration(seconds: 20));
-      // Note: do not auto-subscribe on startup to avoid unintended scans; subscribe happens on group selection
+      // Ensure we are in real BLE mode on mobile.
+      dm.setUseMock(false);
+      // Startup behavior:
+      // - Scan immediately
+      // - Connect to first discovered proxy
+      // - Discover group membership for Default + any user-created groups
+      // - Then begin periodic scan cycles
+      await dm.runStartupDiscovery(
+        budget: const Duration(seconds: 10),
+        initialScan: const Duration(seconds: 8),
+        perGroupDiscoveryWindow: const Duration(milliseconds: 900),
+      );
+      dm.startPeriodicScanCycles(interval: const Duration(minutes: 1), scanDuration: const Duration(seconds: 5));
       } else {
         if (kDebugMode) { debugPrint('Permissions not ok — starting mock scan'); }
         // fall back to mock scanning for now
@@ -38,7 +50,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
     });
   }
 
-  int _selectedGroupId = _kUnknownGroupId; // default to Unknown group on startup
+  int _selectedGroupId = _kDefaultGroupId; // default to Default (0xC000) on startup
   bool _selectionMode = false;
   final Set<String> _selectedMacs = {};
 
@@ -71,16 +83,9 @@ class _DevicesScreenState extends State<DevicesScreen> {
                               Text('${g.name} (0x${g.id.toRadixString(16).toUpperCase()})')
                             ]))),
                       ],
-                                                onChanged: (int? v) async {
+                                                onChanged: (int? v) {
                                                   if (v == null) { return; }
                                                   setState(() => _selectedGroupId = v);
-                                                  // Pre-connect to a proxy for the selected group, then subscribe devices
-                                                  try {
-                                                    final ok = await context.read<DeviceManager>().connectGroupProxy(v);
-                                                    if (!ok) {
-                                                      if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Failed to connect to group proxy')));
-                                                    }
-                                                  } catch (_) {}
                                                 },
                     );
                   },
@@ -221,9 +226,12 @@ class _DevicesScreenState extends State<DevicesScreen> {
                             if (mgr.usingMock) return const SizedBox.shrink();
                             return IconButton(
                               icon: const Icon(Icons.refresh),
-                              tooltip: 'Rescan',
-                              onPressed: () {
-                                mgr.startBLEScanning(timeout: const Duration(seconds: 20));
+                              tooltip: 'Scan now',
+                              onPressed: () async {
+                                await mgr.scanAndDiscoverGroups(
+                                  scanDuration: const Duration(seconds: 5),
+                                  perGroupDiscoveryWindow: const Duration(milliseconds: 1500),
+                                );
                               },
                             );
                           }),
@@ -235,16 +243,21 @@ class _DevicesScreenState extends State<DevicesScreen> {
               builder: (context, manager, _) {
                 final devices = (_selectedGroupId == _kUnknownGroupId)
                   ? manager.devices.where((d) => d.groupId == null).toList()
-                    : (manager.isGroupConfirmed(_selectedGroupId)
-                      ? manager.devices.where((d) => manager.confirmedMembersForGroup(_selectedGroupId)?.contains(d.macAddress) ?? false).toList()
-                      : manager.devices.where((d) => d.groupId == _selectedGroupId).toList());
+                  : (() {
+                      final confirmed = manager.confirmedMembersForGroup(_selectedGroupId) ?? <String>{};
+                      // Show devices assigned to the group OR confirmed via mesh discovery.
+                      return manager.devices.where((d) => d.groupId == _selectedGroupId || confirmed.contains(d.macAddress)).toList();
+                    })();
                 if (devices.isEmpty) {
                   return const Center(child: Text('No devices found'));
                 }
                 return RefreshIndicator(
                   onRefresh: () async {
                     final mgr = context.read<DeviceManager>();
-                    mgr.startBLEScanning(timeout: const Duration(seconds: 20));
+                    await mgr.scanAndDiscoverGroups(
+                      scanDuration: const Duration(seconds: 5),
+                      perGroupDiscoveryWindow: const Duration(milliseconds: 1500),
+                    );
                     // give the scan a moment to run
                     await Future.delayed(const Duration(milliseconds: 300));
                   },

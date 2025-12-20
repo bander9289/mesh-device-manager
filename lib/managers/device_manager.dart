@@ -19,15 +19,25 @@ class DeviceManager extends ChangeNotifier {
 
   Timer? _timer;
   Timer? _stateRefreshTimer;
+  Timer? _periodicScanTimer;
   final Map<String, DateTime> _lastAdvertLogTimes = {};
   DateTime? _lastScanResultsLog;
   Timer? _scanCancelTimer;
   bool verboseLogging = false; // toggle to reduce noisy debug output
   StreamSubscription<List<ScanResult>>? _scanSubscription;
-  bool _usingMock = true;
+  // Default to real BLE scanning on Android/iOS. Keep mock default elsewhere (desktop/tests).
+  bool _usingMock = !(Platform.isAndroid || Platform.isIOS);
   bool filterMeshOnly = true; // default: only include mesh devices
   Set<String> hardwareIdWhitelist = {}; // optional: only include these hardware IDs (empty => no filter)
   int _nextGroupAddress = 0xC000; // default base group address
+
+  // Startup discovery + group scan orchestration
+  bool _startupDiscoveryCompleted = false;
+  bool get startupDiscoveryCompleted => _startupDiscoveryCompleted;
+  int? _activeGroupDiscoveryId;
+  DateTime? _activeGroupDiscoveryDeadline;
+  bool _startupDiscoveryInProgress = false;
+  bool _groupDiscoveryInProgress = false;
 
   // Simple palette we cycle through for new groups
   static const List<int> _colorPalette = [
@@ -41,6 +51,8 @@ class DeviceManager extends ChangeNotifier {
 
   late final MeshClient meshClient;
   final Map<int, Set<String>> _confirmedGroupMembers = {};
+  List<int>? _meshDbUnicastsCache;
+  DateTime? _meshDbUnicastsCacheTime;
   Map<String, String>? meshCredentials;
   // subscription throttle: do not attempt to subscribe more often than this per-device
   static const Duration _subscribeCooldown = Duration(seconds: 60);
@@ -120,6 +132,340 @@ class DeviceManager extends ChangeNotifier {
     setMeshCredentials(creds);
   }
 
+  /// Run a short startup discovery phase:
+  /// 1) BLE scan until at least one mesh device is found
+  /// 2) Connect to that device's Mesh Proxy
+  /// 3) For each configured group (Default + user-created), send a GenericOnOffGet
+  ///    and treat responders as confirmed members. If a responder is unassigned,
+  ///    assign it to the discovered group.
+  ///
+  /// Total runtime is capped by [budget] (default ~8s).
+  Future<void> runStartupDiscovery({
+    Duration budget = const Duration(seconds: 10),
+    Duration initialScan = const Duration(seconds: 8),
+    Duration perGroupDiscoveryWindow = const Duration(milliseconds: 1500),
+  }) async {
+    if (_usingMock) {
+      _startupDiscoveryCompleted = true;
+      notifyListeners();
+      return;
+    }
+    if (_startupDiscoveryInProgress) return;
+    _startupDiscoveryInProgress = true;
+
+    final deadline = DateTime.now().add(budget);
+    try {
+      // Start scanning (do not clear devices; we want to preserve assignments across cycles).
+      if (!isScanning) {
+        startBLEScanning(timeout: initialScan, clearExisting: false);
+      }
+
+      // Wait briefly for the first device.
+      final firstFound = await _waitForFirstMeshDevice(deadline: deadline);
+      if (!firstFound) {
+        if (kDebugMode) debugPrint('runStartupDiscovery: no devices found before budget expired');
+        return;
+      }
+
+      // Stop scanning before attempting proxy connection.
+      final wasScanning = isScanning;
+      if (wasScanning) {
+        stopScanning();
+        await Future.delayed(const Duration(milliseconds: 250));
+      }
+
+      // Connect to proxy using the first good candidate.
+      final proxyCandidate = _pickProxyCandidateMac();
+      if (proxyCandidate == null) {
+        if (wasScanning) startBLEScanning(timeout: const Duration(seconds: 5), clearExisting: false);
+        return;
+      }
+      final proxyOk = await _ensureProxyConnected(proxyCandidate);
+      if (!proxyOk) {
+        if (wasScanning) startBLEScanning(timeout: const Duration(seconds: 5), clearExisting: false);
+        return;
+      }
+
+      // Pull group subscriptions from the mesh database. This is more reliable than
+      // waiting for runtime status responses (some nodes may not respond).
+      await _refreshGroupMembershipFromMeshDatabase();
+
+      // After proxy is connected, do a brief scan burst to pick up other devices.
+      // This prevents us from configuring the proxy filter with only the first device.
+      if (!isScanning) {
+        startBLEScanning(timeout: const Duration(seconds: 2), clearExisting: false);
+      }
+      await Future.delayed(const Duration(seconds: 2));
+      if (isScanning) stopScanning();
+
+      // Discover members for each configured group. Default group always first.
+      final orderedGroups = _orderedGroupsForDiscovery();
+      final multiGroup = orderedGroups.length > 1;
+      for (final group in orderedGroups) {
+        if (DateTime.now().isAfter(deadline)) break;
+
+        // If user has multiple groups configured, do a brief scan burst before each
+        // group discovery to refresh device list / adv data.
+        if (multiGroup) {
+          if (!isScanning) {
+            startBLEScanning(timeout: const Duration(seconds: 2), clearExisting: false);
+          }
+          await Future.delayed(const Duration(milliseconds: 500));
+          if (isScanning) stopScanning();
+          await Future.delayed(const Duration(milliseconds: 150));
+        }
+
+        await _discoverAndAssignGroup(group.id, window: perGroupDiscoveryWindow);
+      }
+    } finally {
+      _startupDiscoveryInProgress = false;
+      _startupDiscoveryCompleted = true;
+      notifyListeners();
+    }
+  }
+
+  /// Start periodic scan cycles (defaults: every minute, scan for 5 seconds).
+  void startPeriodicScanCycles({
+    Duration interval = const Duration(minutes: 1),
+    Duration scanDuration = const Duration(seconds: 5),
+  }) {
+    if (_usingMock) return;
+    _periodicScanTimer?.cancel();
+    _periodicScanTimer = Timer.periodic(interval, (_) {
+      // Avoid running during the startup discovery window or if a scan is already active.
+      if (_startupDiscoveryInProgress) return;
+      if (isScanning) return;
+      startBLEScanning(timeout: scanDuration, clearExisting: false);
+    });
+  }
+
+  void stopPeriodicScanCycles() {
+    _periodicScanTimer?.cancel();
+    _periodicScanTimer = null;
+  }
+
+  /// Manual scan trigger for the UI.
+  void triggerScanCycle({Duration duration = const Duration(seconds: 5)}) {
+    if (_usingMock) return;
+    if (_startupDiscoveryInProgress) return;
+    if (isScanning) return;
+    startBLEScanning(timeout: duration, clearExisting: false);
+  }
+
+  /// User-triggered rescan that also runs mesh group discovery so devices can be
+  /// automatically assigned to groups.
+  Future<void> scanAndDiscoverGroups({
+    Duration scanDuration = const Duration(seconds: 5),
+    Duration perGroupDiscoveryWindow = const Duration(milliseconds: 1500),
+  }) async {
+    if (_usingMock) return;
+    if (_startupDiscoveryInProgress) return;
+    if (_groupDiscoveryInProgress) return;
+    _groupDiscoveryInProgress = true;
+
+    try {
+      // Scan burst to refresh device list/advertisements.
+      if (isScanning) stopScanning();
+      startBLEScanning(timeout: scanDuration, clearExisting: false);
+      await Future.delayed(scanDuration);
+      if (isScanning) stopScanning();
+
+      final proxyCandidate = _pickProxyCandidateMac();
+      if (proxyCandidate == null) {
+        return;
+      }
+
+      // Ensure proxy connection and refresh proxy filter based on all known devices.
+      final proxyOk = await _ensureProxyConnected(proxyCandidate);
+      if (!proxyOk) {
+        return;
+      }
+
+      // Sync group membership from mesh DB before doing active discovery.
+      await _refreshGroupMembershipFromMeshDatabase();
+
+      final orderedGroups = _orderedGroupsForDiscovery();
+      for (final group in orderedGroups) {
+        await _discoverAndAssignGroup(group.id, window: perGroupDiscoveryWindow);
+      }
+    } finally {
+      _groupDiscoveryInProgress = false;
+      notifyListeners();
+    }
+  }
+
+  bool _isGroupAddress(int address) {
+    // Standard group address range (0xC000–0xFEFF).
+    return address >= 0xC000 && address <= 0xFEFF;
+  }
+
+  void _ensureGroupExists(int groupId) {
+    if (_groups.any((g) => g.id == groupId)) return;
+    final groupName = groupId == 0xC000
+        ? 'Default'
+        : 'Group 0x${groupId.toRadixString(16).toUpperCase()}';
+    final color = _colorPalette[_groups.length % _colorPalette.length];
+    _groups.add(MeshGroup(id: groupId, name: groupName, colorValue: color));
+    _nextGroupAddress = (groupId >= _nextGroupAddress) ? groupId + 1 : _nextGroupAddress;
+  }
+
+  Future<void> _refreshGroupMembershipFromMeshDatabase() async {
+    if (meshClient is! PlatformMeshClient) return;
+    final pm = meshClient as PlatformMeshClient;
+    if (!pm.isPluginAvailable) return;
+
+    final nodes = await pm.getNodeSubscriptions();
+    if (nodes.isEmpty) return;
+
+    // Cache mesh DB unicasts so we can configure proxy filter even if a node
+    // wasn't seen in the most recent scan burst.
+    final dbUnicasts = <int>[];
+
+    final subsByUnicast = <int, Set<int>>{};
+    final allGroupsSeen = <int>{};
+
+    for (final n in nodes) {
+      final unicast = n['unicastAddress'];
+      if (unicast is! int || unicast <= 0) continue;
+
+      dbUnicasts.add(unicast);
+
+      final subsRaw = n['subscriptions'];
+      final subs = <int>{};
+      if (subsRaw is List) {
+        for (final v in subsRaw) {
+          if (v is int) subs.add(v);
+        }
+      }
+      subsByUnicast[unicast] = subs;
+      allGroupsSeen.addAll(subs.where(_isGroupAddress));
+    }
+
+    _meshDbUnicastsCache = dbUnicasts.toSet().toList();
+    _meshDbUnicastsCacheTime = DateTime.now();
+
+    // Ensure group definitions exist for all subscribed groups.
+    for (final gid in allGroupsSeen) {
+      _ensureGroupExists(gid);
+    }
+
+    // Apply membership + best-effort primary group assignment.
+    for (final d in _devices) {
+      final subs = subsByUnicast[d.unicastAddress];
+      if (subs == null || subs.isEmpty) continue;
+
+      for (final gid in subs) {
+        if (!_isGroupAddress(gid)) continue;
+        _confirmedGroupMembers.putIfAbsent(gid, () => <String>{}).add(d.macAddress);
+      }
+
+      if (d.groupId == null) {
+        if (subs.contains(0xC000)) {
+          d.groupId = 0xC000;
+        } else {
+          final firstGroup = subs.firstWhere(_isGroupAddress, orElse: () => 0);
+          if (firstGroup != 0) d.groupId = firstGroup;
+        }
+      }
+    }
+
+    notifyListeners();
+  }
+
+  Future<List<int>> _collectKnownUnicasts(PlatformMeshClient pm) async {
+    final fromScan = _devices
+        .map((d) => d.unicastAddress)
+        .where((u) => u > 0)
+        .toList();
+
+    // Prefer cached DB unicasts if fresh; otherwise refresh once.
+    final now = DateTime.now();
+    final cacheFresh = _meshDbUnicastsCache != null &&
+        _meshDbUnicastsCacheTime != null &&
+        now.difference(_meshDbUnicastsCacheTime!).inSeconds < 30;
+
+    if (!cacheFresh) {
+      try {
+        await _refreshGroupMembershipFromMeshDatabase();
+      } catch (_) {
+        // best-effort
+      }
+    }
+
+    final fromDb = _meshDbUnicastsCache ?? const <int>[];
+    return {...fromScan, ...fromDb}.toList();
+  }
+
+  Future<bool> _waitForFirstMeshDevice({required DateTime deadline}) async {
+    // Important: FlutterBluePlus scanning stops automatically after the timeout.
+    // Keep scanning in short bursts until we see at least one device or budget expires.
+    while (DateTime.now().isBefore(deadline)) {
+      if (_devices.isNotEmpty) return true;
+
+      // If scan already stopped (timeout elapsed), restart a short burst.
+      if (!isScanning) {
+        final remainingMs = deadline.difference(DateTime.now()).inMilliseconds;
+        final burst = Duration(milliseconds: remainingMs.clamp(500, 2000));
+        startBLEScanning(timeout: burst, clearExisting: false);
+      }
+
+      await Future.delayed(const Duration(milliseconds: 150));
+    }
+    return _devices.isNotEmpty;
+  }
+
+  String? _pickProxyCandidateMac() {
+    if (_devices.isEmpty) return null;
+    // Prefer devices whose advertisement suggests Mesh Proxy service.
+    final proxy = _devices.firstWhere(
+      (d) => d.version.toLowerCase().contains('1828') || d.version.toLowerCase().contains('00001828'),
+      orElse: () => _devices.first,
+    );
+    return proxy.macAddress;
+  }
+
+  List<MeshGroup> _orderedGroupsForDiscovery() {
+    // Default group (0xC000) first, then all others by creation order.
+    final def = _groups.where((g) => g.id == 0xC000).toList();
+    final rest = _groups.where((g) => g.id != 0xC000).toList();
+    return [...def, ...rest];
+  }
+
+  Future<bool> _ensureProxyConnected(String mac) async {
+    try {
+      if (meshClient is! PlatformMeshClient) return false;
+      final pm = meshClient as PlatformMeshClient;
+      final allUnicasts = await _collectKnownUnicasts(pm);
+      return await pm.ensureProxyConnection(mac, deviceUnicasts: allUnicasts);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> _discoverAndAssignGroup(int groupId, {required Duration window}) async {
+    if (meshClient is! PlatformMeshClient) return;
+    final pm = meshClient as PlatformMeshClient;
+
+    final allUnicasts = await _collectKnownUnicasts(pm);
+
+    _activeGroupDiscoveryId = groupId;
+    _activeGroupDiscoveryDeadline = DateTime.now().add(window);
+    _confirmedGroupMembers.putIfAbsent(groupId, () => <String>{});
+    notifyListeners();
+
+    try {
+      await pm.discoverGroupMembers(groupId, deviceUnicasts: allUnicasts);
+      // Wait for status callbacks to arrive.
+      await Future.delayed(window);
+    } catch (_) {
+      // best-effort
+    } finally {
+      _activeGroupDiscoveryId = null;
+      _activeGroupDiscoveryDeadline = null;
+      notifyListeners();
+    }
+  }
+
   Future<void> setMeshCredentials(Map<String, String> creds) async {
     meshCredentials = creds;
     await meshClient.initialize(creds);
@@ -189,6 +535,7 @@ class DeviceManager extends ChangeNotifier {
     if (_usingMock == useMock) { return; }
     _usingMock = useMock;
     if (_usingMock) {
+      stopPeriodicScanCycles();
       stopScanning();
       startMockScanning();
     } else {
@@ -225,11 +572,13 @@ class DeviceManager extends ChangeNotifier {
     return _deviceCache[normalized];
   }
 
-  void startBLEScanning({Duration? timeout}) {
+  void startBLEScanning({Duration? timeout, bool clearExisting = false}) {
     if (_scanSubscription != null) { return; }
-    // Clear current devices but keep cache
-    _devices.clear();
-    if (kDebugMode) debugPrint('startBLEScanning: starting, cleared devices');
+    // Optionally clear current devices but keep cache
+    if (clearExisting) {
+      _devices.clear();
+    }
+    if (kDebugMode) debugPrint('startBLEScanning: starting (clearExisting=$clearExisting)');
     _scanSubscription = FlutterBluePlus.scanResults.listen((results) {
       if (kDebugMode && results.isNotEmpty) {
         final now = DateTime.now();
@@ -280,8 +629,10 @@ class DeviceManager extends ChangeNotifier {
         final idx = _devices.indexWhere((d) => d.macAddress == mac);
         if (idx >= 0) {
           final existing = _devices[idx];
+          final defaultGroupId = _groups.any((g) => g.id == 0xC000) ? 0xC000 : null;
+          final nextGroupId = existing.groupId ?? defaultGroupId;
           // update rssi and battery
-          if (existing.rssi != device.rssi || existing.batteryPercent != device.batteryPercent) {
+          if (existing.rssi != device.rssi || existing.batteryPercent != device.batteryPercent || nextGroupId != existing.groupId) {
             _devices[idx] = MeshDevice(
               macAddress: existing.macAddress,
               identifier: existing.identifier,
@@ -289,13 +640,18 @@ class DeviceManager extends ChangeNotifier {
               batteryPercent: device.batteryPercent,
               rssi: device.rssi,
               version: device.version,
-              groupId: existing.groupId,
+              groupId: nextGroupId,
               lightOn: existing.lightOn,
             );
             changed = true;
             if (kDebugMode && verboseLogging) debugPrint('Updated device $mac rssi=${device.rssi} battery=${device.batteryPercent}');
           }
         } else {
+          // If we can't reliably infer group membership yet, default new devices to Default group.
+          // This prevents newly discovered nodes (including proxies) from lingering in "Unknown".
+          if (device.groupId == null && _groups.any((g) => g.id == 0xC000)) {
+            device.groupId = 0xC000;
+          }
           _devices.add(device);
           if (kDebugMode && verboseLogging) debugPrint('Added new device $mac id=$identifier hw=$hw rssi=${r.rssi}');
           changed = true;
@@ -976,6 +1332,7 @@ class DeviceManager extends ChangeNotifier {
       version: d.version,
       groupId: d.groupId,
       lightOn: lightOn ?? d.lightOn,
+      connectionStatus: d.connectionStatus,
     );
     notifyListeners();
   }
@@ -995,6 +1352,21 @@ class DeviceManager extends ChangeNotifier {
       if (kDebugMode) {
         debugPrint('DeviceManager: Matched unicast 0x${unicastAddress.toRadixString(16)} to device ${device.identifier} (${device.macAddress})');
       }
+      final now = DateTime.now();
+      final activeGroupId = _activeGroupDiscoveryId;
+      final activeDeadline = _activeGroupDiscoveryDeadline;
+
+      // During an active discovery window, confirm membership for the active group.
+      // Only assign groupId automatically if the device is currently unassigned.
+      int? nextGroupId = device.groupId;
+      if (activeGroupId != null && activeDeadline != null && now.isBefore(activeDeadline)) {
+        final confirmed = _confirmedGroupMembers.putIfAbsent(activeGroupId, () => <String>{});
+        confirmed.add(device.macAddress);
+        if (nextGroupId == null) {
+          nextGroupId = activeGroupId;
+        }
+      }
+
       _devices[deviceIndex] = MeshDevice(
         macAddress: device.macAddress,
         identifier: device.identifier,
@@ -1002,12 +1374,12 @@ class DeviceManager extends ChangeNotifier {
         batteryPercent: device.batteryPercent,
         rssi: device.rssi,
         version: device.version,
-        groupId: device.groupId,
+        groupId: nextGroupId,
         lightOn: state,
         connectionStatus: device.connectionStatus,
       );
       notifyListeners();
-      // Mark this device as a confirmed member of its group (if assigned)
+      // Mark this device as a confirmed member of its assigned group (if assigned).
       final deviceAfter = _devices[deviceIndex];
       if (deviceAfter.groupId != null) {
         final gid = deviceAfter.groupId!;
@@ -1019,5 +1391,13 @@ class DeviceManager extends ChangeNotifier {
         debugPrint('DeviceManager: No device found with unicast 0x${unicastAddress.toRadixString(16)}');
       }
     }
+  }
+
+  @override
+  void dispose() {
+    stopPeriodicScanCycles();
+    stopScanning();
+    stopMockScanning();
+    super.dispose();
   }
 }

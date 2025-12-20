@@ -231,11 +231,12 @@ class PlatformMeshClient implements MeshClient {
     _onDeviceStatus = callback;
   }
   
-  Future<bool> discoverGroupMembers(int groupAddress, {bool currentState = false}) async {
+  Future<bool> discoverGroupMembers(int groupAddress, {bool currentState = false, List<int>? deviceUnicasts}) async {
     try {
       final result = await _channel.invokeMethod('discoverGroupMembers', {
         'groupAddress': groupAddress,
         'currentState': currentState,
+        if (deviceUnicasts != null) 'deviceUnicasts': deviceUnicasts,
       });
       return result == true;
     } catch (e) {
@@ -395,6 +396,24 @@ class PlatformMeshClient implements MeshClient {
     } catch (e) {
       if (kDebugMode) debugPrint('PlatformMeshClient.configureProxyFilter error: $e');
       return false;
+    }
+  }
+
+  /// Read node subscription lists from the native mesh database.
+  /// Useful for group membership discovery even when nodes don't respond to
+  /// runtime status queries.
+  Future<List<Map<String, dynamic>>> getNodeSubscriptions() async {
+    if (!_available) return <Map<String, dynamic>>[];
+    try {
+      final res = await _channel.invokeMethod<List>('getNodeSubscriptions');
+      if (res == null) return <Map<String, dynamic>>[];
+      return res
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e.map((k, v) => MapEntry(k.toString(), v))))
+          .toList();
+    } catch (e) {
+      if (kDebugMode) debugPrint('PlatformMeshClient.getNodeSubscriptions error: $e');
+      return <Map<String, dynamic>>[];
     }
   }
 

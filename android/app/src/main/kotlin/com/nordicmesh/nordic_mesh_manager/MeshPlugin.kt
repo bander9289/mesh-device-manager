@@ -3,7 +3,6 @@ package com.nordicmesh.nordic_mesh_manager
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCharacteristic
 import android.content.Context
-import android.util.SparseIntArray
 import androidx.annotation.NonNull
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.plugin.common.MethodCall
@@ -11,7 +10,6 @@ import io.flutter.plugin.common.MethodChannel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import no.nordicsemi.android.ble.callback.DataReceivedCallback
 import no.nordicsemi.android.mesh.ApplicationKey
@@ -19,23 +17,21 @@ import no.nordicsemi.android.mesh.MeshManagerApi
 import no.nordicsemi.android.mesh.MeshManagerCallbacks
 import no.nordicsemi.android.mesh.MeshNetwork
 import no.nordicsemi.android.mesh.NetworkKey
-import no.nordicsemi.android.mesh.NodeKey
 import no.nordicsemi.android.mesh.MeshStatusCallbacks
 import no.nordicsemi.android.mesh.transport.GenericOnOffSet
-import no.nordicsemi.android.mesh.transport.GenericOnOffSetUnacknowledged
 import no.nordicsemi.android.mesh.transport.GenericOnOffGet
 import no.nordicsemi.android.mesh.transport.GenericOnOffStatus
-import no.nordicsemi.android.mesh.transport.ProvisionedMeshNode
 import no.nordicsemi.android.mesh.transport.MeshMessage
 import no.nordicsemi.android.mesh.transport.ProxyConfigSetFilterType
 import no.nordicsemi.android.mesh.transport.ProxyConfigAddAddressToFilter
 import no.nordicsemi.android.mesh.utils.ProxyFilterType
 import no.nordicsemi.android.mesh.utils.AddressArray
 import no.nordicsemi.android.mesh.provisionerstates.UnprovisionedMeshNode
-import no.nordicsemi.android.mesh.utils.SecureUtils
 import java.util.UUID
 import kotlin.random.Random
-import kotlinx.coroutines.Job
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 
 class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
     companion object {
@@ -57,147 +53,6 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
     private var proxyFilterConfigured = false
     private var lastProxyFilterAddresses: Set<Int> = emptySet()
     private var currentProxyUnicast: Int? = null
-    private var lastProvisionerSeqPersistMs: Long = 0
-    private var lastProvisionerSeqPrefsPersistMs: Long = 0
-    private var lastKnownDeviceUnicasts: Set<Int> = emptySet()
-
-    private var onOffPollingJob: Job? = null
-    private val lastKnownOnOffState: MutableMap<Int, Boolean> = mutableMapOf()
-
-    private data class RecentPdu(val atMs: Long, val bytes: ByteArray)
-    private val recentSentPdus: ArrayDeque<RecentPdu> = ArrayDeque()
-
-    private fun isVerboseLoggingEnabled(): Boolean = try {
-        ::context.isInitialized &&
-            ((context.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE) != 0)
-    } catch (_: Exception) {
-        false
-    }
-
-    private fun rememberSentPdu(pdu: ByteArray) {
-        val now = android.os.SystemClock.elapsedRealtime()
-        // Keep ~3 seconds of history.
-        val cutoff = now - 3_000
-        while (recentSentPdus.isNotEmpty() && recentSentPdus.first().atMs < cutoff) {
-            recentSentPdus.removeFirst()
-        }
-        // Cap to avoid unbounded growth.
-        while (recentSentPdus.size >= 40) {
-            recentSentPdus.removeFirst()
-        }
-        recentSentPdus.addLast(RecentPdu(now, pdu.clone()))
-    }
-
-    private fun isEchoOfRecentlySent(pdu: ByteArray): Boolean {
-        val now = android.os.SystemClock.elapsedRealtime()
-        val cutoff = now - 2_000
-        for (entry in recentSentPdus) {
-            if (entry.atMs < cutoff) continue
-            if (entry.bytes.contentEquals(pdu)) return true
-        }
-        return false
-    }
-
-    // Heuristics for automatic replay protection repair.
-    private var lastRxPduMs: Long = 0
-    private var lastDecryptionFailureMs: Long = 0
-    private var lastAutoReplayRepairMs: Long = 0
-    private var pendingUnicast: PendingUnicast? = null
-
-    private data class PendingUnicast(
-        val dst: Int,
-        val state: Boolean?,
-        val isGet: Boolean,
-        val createdAtMs: Long,
-        val attempts: Int,
-    )
-
-    private var lastStatusRxMs: Long = 0
-
-    private fun getProvisionerUnicastOrNull(): Int? {
-        val network = meshNetwork ?: return null
-        return network.selectedProvisioner?.provisionerAddress
-            ?: network.provisioners.firstOrNull()?.provisionerAddress
-    }
-
-    private fun prefsOrNull() = try {
-        if (!::context.isInitialized) null else context.getSharedPreferences("mesh_plugin", Context.MODE_PRIVATE)
-    } catch (_: Exception) {
-        null
-    }
-
-    private fun seqPrefsKey(meshUuid: String, provisionerAddress: Int): String =
-        "seq_${meshUuid}_0x${provisionerAddress.toString(16)}"
-
-    private fun loadPersistedProvisionerSequence(meshUuid: String, provisionerAddress: Int): Int? {
-        val prefs = prefsOrNull() ?: return null
-        val key = seqPrefsKey(meshUuid, provisionerAddress)
-        val value = prefs.getInt(key, -1)
-        return if (value >= 0) value else null
-    }
-
-    private fun persistProvisionerSequenceToPrefsIfNeeded(meshUuid: String, provisionerAddress: Int, seq: Int, reason: String) {
-        val prefs = prefsOrNull() ?: return
-
-        // Throttle writes (SharedPreferences commit/apply can be chatty under heavy TX).
-        val now = android.os.SystemClock.elapsedRealtime()
-        if (now - lastProvisionerSeqPrefsPersistMs < 1_000) return
-        lastProvisionerSeqPrefsPersistMs = now
-
-        try {
-            prefs.edit().putInt(seqPrefsKey(meshUuid, provisionerAddress), seq).apply()
-            android.util.Log.v(
-                "MeshPlugin",
-                "Saved provisioner seq=$seq for 0x${provisionerAddress.toString(16)} to prefs ($reason)"
-            )
-        } catch (e: Exception) {
-            android.util.Log.w("MeshPlugin", "Failed to persist provisioner seq to prefs ($reason): ${e.message}")
-        }
-    }
-
-    /**
-     * Reserve the next sequence number (monotonic) for the provisioner.
-     *
-     * Zephyr (and other stacks) will drop messages that reuse the same (src, seq) as replay.
-     * We manage the seq locally because this app does not import a full mesh DB, and the Nordic
-     * SDK may not reliably persist or advance the provisioner's seq in this partial-network setup.
-     */
-    private fun reserveNextProvisionerSequence(reason: String) {
-        val network = meshNetwork ?: return
-        val provisionerAddress = getProvisionerUnicastOrNull() ?: return
-
-        val meshUuid = network.meshUUID
-        val seqs: SparseIntArray = network.sequenceNumbers
-        val current = seqs.get(provisionerAddress, 0)
-        val next = ((current + 1) and 0xFFFFFF).let { if (it == 0) 1 else it }
-        seqs.put(provisionerAddress, next)
-        network.setSequenceNumbers(seqs)
-        persistProvisionerSequenceToPrefsIfNeeded(meshUuid, provisionerAddress, next, "reserve:$reason")
-    }
-
-    private fun decodeOpcode(accessPayload: ByteArray?): Int? {
-        if (accessPayload == null || accessPayload.isEmpty()) return null
-        val b0 = accessPayload[0].toInt() and 0xFF
-        // Bluetooth Mesh opcode encoding:
-        // - 1 octet: 0b0xxxxxxx
-        // - 2 octets (SIG): 0b10xxxxxx
-        // - 3 octets (vendor): 0b11xxxxxx
-        return when {
-            (b0 and 0x80) == 0x00 -> b0
-            (b0 and 0xC0) == 0x80 -> if (accessPayload.size >= 2) {
-                (b0 shl 8) or (accessPayload[1].toInt() and 0xFF)
-            } else null
-            (b0 and 0xC0) == 0xC0 -> if (accessPayload.size >= 3) {
-                (b0 shl 16) or ((accessPayload[1].toInt() and 0xFF) shl 8) or (accessPayload[2].toInt() and 0xFF)
-            } else null
-            else -> null
-        }
-    }
-
-    private fun bytesToHex(bytes: ByteArray?): String {
-        if (bytes == null) return ""
-        return bytes.joinToString(" ") { "%02X".format(it) }
-    }
 
     private fun normalizeMac(macAddress: String): String = macAddress.uppercase().replace("-", ":")
 
@@ -217,189 +72,6 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             if (unicast == 0) 0x0001 else unicast
         } catch (_: Exception) {
             null
-        }
-    }
-
-    private fun ensureProvisionerAddress(network: MeshNetwork): Int {
-        val selected = network.selectedProvisioner ?: network.provisioners.firstOrNull()
-
-        if (selected == null) {
-            android.util.Log.w("MeshPlugin", "No provisioner present; creating and adding default provisioner")
-            val created = network.createProvisioner("Kantmiss Provisioner")
-            val address = created.allocatedUnicastRanges.firstOrNull()?.lowAddress ?: 0x0001
-            created.assignProvisionerAddress(address)
-            network.addProvisioner(created)
-            network.selectProvisioner(created)
-            return address
-        }
-
-        network.selectProvisioner(selected)
-        val existingAddress = selected.provisionerAddress
-        if (existingAddress != null) return existingAddress
-
-        val address = selected.allocatedUnicastRanges.firstOrNull()?.lowAddress ?: 0x0001
-        android.util.Log.w(
-            "MeshPlugin",
-            "Selected provisioner has no address; assigning 0x${address.toString(16)} and updating"
-        )
-        selected.assignProvisionerAddress(address)
-        network.updateProvisioner(selected)
-        return address
-    }
-
-    private fun persistProvisionerSequenceIfNeeded(reason: String) {
-        val network = meshNetwork ?: return
-        val provisioner = network.selectedProvisioner ?: network.provisioners.firstOrNull() ?: return
-        val provisionerAddress = provisioner.provisionerAddress ?: return
-
-        // Throttle to avoid hammering Room DB when we send many proxy config PDUs.
-        val now = android.os.SystemClock.elapsedRealtime()
-        if (now - lastProvisionerSeqPersistMs < 750) return
-        lastProvisionerSeqPersistMs = now
-
-        val seq = network.sequenceNumbers.get(provisionerAddress, 0)
-        persistProvisionerSequenceToPrefsIfNeeded(network.meshUUID, provisionerAddress, seq, "throttled:$reason")
-    }
-
-    private fun persistProvisionerSequenceNow(reason: String) {
-        val network = meshNetwork ?: return
-        val provisioner = network.selectedProvisioner ?: network.provisioners.firstOrNull() ?: return
-        val provisionerAddress = provisioner.provisionerAddress ?: return
-        try {
-            val seq = network.sequenceNumbers.get(provisionerAddress, 0)
-            persistProvisionerSequenceToPrefsIfNeeded(network.meshUUID, provisionerAddress, seq, "now:$reason")
-        } catch (e: Exception) {
-            android.util.Log.w("MeshPlugin", "Failed to persist provisioner sequence ($reason): ${e.message}")
-        }
-    }
-
-    private fun ensureMinimumProvisionerSequence(minimum: Int, reason: String) {
-        val network = meshNetwork ?: return
-        val provisioner = network.selectedProvisioner ?: network.provisioners.firstOrNull() ?: return
-        val provisionerAddress = provisioner.provisionerAddress ?: return
-
-        val current = network.sequenceNumbers.get(provisionerAddress, 0)
-        if (current >= minimum) return
-
-        val maxSeq = 0xFFFFFF
-        val target = minimum.coerceAtMost(maxSeq)
-        val seqs: SparseIntArray = network.sequenceNumbers
-        seqs.put(provisionerAddress, target)
-        network.setSequenceNumbers(seqs)
-        persistProvisionerSequenceNow("ensureMinimumProvisionerSequence:$reason")
-        android.util.Log.w(
-            "MeshPlugin",
-            "Bumped provisioner seq 0x${provisionerAddress.toString(16)}: $current -> $target ($reason)"
-        )
-    }
-
-    private fun isValidUnicast(address: Int): Boolean = address in 0x0001..0x7FFF
-
-    /**
-     * Nordic's Mesh library only attempts to decrypt/parse inbound Network PDUs if the SRC is a known node.
-     * This app does not import a full mesh JSON, so we create lightweight "debug" nodes for device unicasts
-     * we intend to talk to.
-     */
-    private fun ensureDebugNodesForUnicasts(unicasts: Collection<Int>) {
-        val network = meshNetwork ?: return
-
-        val meshUuid = network.meshUUID
-        val netKeyIndex = network.netKeys.firstOrNull()?.keyIndex ?: return
-        val appKeyIndex = network.appKeys.firstOrNull()?.keyIndex ?: return
-
-        unicasts.forEach { address ->
-            if (!isValidUnicast(address)) return@forEach
-            if (network.getNode(address) != null) return@forEach
-
-            try {
-                val node = ProvisionedMeshNode()
-                node.setMeshUuid(meshUuid)
-                node.setUuid(UUID.randomUUID().toString())
-                node.setNodeName("Debug 0x${address.toString(16)}")
-                node.setUnicastAddress(address)
-                node.setDeviceKey(SecureUtils.generateRandomNumber())
-                node.setAddedNetKeys(mutableListOf(NodeKey(netKeyIndex, false)))
-                node.setAddedAppKeys(mutableListOf(NodeKey(appKeyIndex, false)))
-                network.addNode(node)
-                android.util.Log.i(
-                    "MeshPlugin",
-                    "Added debug node for 0x${address.toString(16)} (netKeyIndex=$netKeyIndex, appKeyIndex=$appKeyIndex)"
-                )
-            } catch (e: Exception) {
-                android.util.Log.w(
-                    "MeshPlugin",
-                    "Failed adding debug node for 0x${address.toString(16)}: ${e.message}"
-                )
-            }
-        }
-    }
-
-    private fun startOnOffPollingAfterTrigger(unicasts: List<Int>, stopWhenOff: Boolean) {
-        onOffPollingJob?.cancel()
-        if (unicasts.isEmpty()) return
-
-        val appKey = meshNetwork?.appKeys?.firstOrNull { it.keyIndex == 0 }
-            ?: meshNetwork?.appKeys?.firstOrNull()
-            ?: return
-
-        val active = unicasts.filter { isValidUnicast(it) }.toMutableSet()
-        if (active.isEmpty()) return
-
-        // Track per-trigger session state so we only stop once a device has been seen ON.
-        val seenOnInThisSession = mutableSetOf<Int>()
-        active.forEach { lastKnownOnOffState.remove(it) }
-
-        onOffPollingJob = scope.launch {
-            val startedAt = android.os.SystemClock.elapsedRealtime()
-            val timeoutMs = 45_000L
-            val intervalMs = 1_000L
-            val perMessageGapMs = 90L
-
-            // Let the group SET propagate before the first poll.
-            delay(250)
-
-            android.util.Log.i(
-                "MeshPlugin",
-                "Starting GenericOnOffGet polling for ${active.size} devices (stopWhenOff=$stopWhenOff)"
-            )
-
-            while (isConnected && active.isNotEmpty() && (android.os.SystemClock.elapsedRealtime() - startedAt) < timeoutMs) {
-                // Keep filter inclusive so replies/publications reach us.
-                configureProxyFilterInternal(active.toList(), includeDefaultGroup = true)
-
-                // Poll each active device.
-                for (dst in active.toList()) {
-                    try {
-                        reserveNextProvisionerSequence("poll-get:0x${dst.toString(16)}")
-                        meshManagerApi.createMeshPdu(dst, GenericOnOffGet(appKey))
-                    } catch (e: Exception) {
-                        android.util.Log.w("MeshPlugin", "Polling GET to 0x${dst.toString(16)} failed: ${e.message}")
-                    }
-                    delay(perMessageGapMs)
-                }
-
-                if (stopWhenOff) {
-                    // Update session flags.
-                    active.forEach { addr ->
-                        val state = lastKnownOnOffState[addr]
-                        if (state == true) seenOnInThisSession.add(addr)
-                    }
-
-                    // Remove devices that are now OFF, but only after we have observed them ON at least once
-                    // since this trigger started.
-                    active.removeAll { addr ->
-                        val state = lastKnownOnOffState[addr]
-                        state == false && seenOnInThisSession.contains(addr)
-                    }
-                }
-
-                delay(intervalMs)
-            }
-
-            android.util.Log.i(
-                "MeshPlugin",
-                "Stopped polling (remaining=${active.size}, connected=$isConnected)"
-            )
         }
     }
 
@@ -444,9 +116,87 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             "sendUnicastMessage" -> sendUnicastMessage(call, result)
             "sendUnicastGet" -> sendUnicastGet(call, result)
             "configureProxyFilter" -> configureProxyFilter(call, result)
+            "getNodeSubscriptions" -> getNodeSubscriptions(result)
             "resetMeshNetwork" -> resetMeshNetwork(result)
-            "repairReplayProtection" -> repairReplayProtection(call, result)
             else -> result.notImplemented()
+        }
+    }
+
+    private fun parseMeshAddress(value: Any?): Int? {
+        return try {
+            when (value) {
+                null -> null
+                is Int -> value
+                is Long -> value.toInt()
+                is String -> {
+                    val s = value.trim().lowercase()
+                    if (s.startsWith("0x")) s.substring(2).toInt(16) else s.toInt()
+                }
+                else -> null
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /**
+     * Return mesh node subscription data derived from the persisted mesh network database.
+     * This avoids relying solely on runtime status responses (e.g. GenericOnOffStatus),
+     * which some nodes may not publish.
+     *
+     * Shape:
+     * [{"unicastAddress": 0x1234, "name": "Node", "subscriptions": [0xC000, ...]}, ...]
+     */
+    private fun getNodeSubscriptions(result: MethodChannel.Result) {
+        scope.launch {
+            try {
+                val json = meshManagerApi.exportMeshNetwork()
+                if (json.isNullOrEmpty()) {
+                    result.success(emptyList<Map<String, Any>>())
+                    return@launch
+                }
+
+                val root = JSONObject(json)
+                val nodesArray = root.optJSONArray("nodes") ?: JSONArray()
+                val out = mutableListOf<Map<String, Any>>()
+
+                for (i in 0 until nodesArray.length()) {
+                    val nodeObj = nodesArray.optJSONObject(i) ?: continue
+
+                    val unicast = nodeObj.optInt("unicastAddress", -1)
+                    if (unicast <= 0) continue
+
+                    val name = nodeObj.optString("name", "")
+                    val subs = mutableSetOf<Int>()
+
+                    val elements = nodeObj.optJSONArray("elements") ?: JSONArray()
+                    for (e in 0 until elements.length()) {
+                        val elementObj = elements.optJSONObject(e) ?: continue
+                        val models = elementObj.optJSONArray("models") ?: JSONArray()
+                        for (m in 0 until models.length()) {
+                            val modelObj = models.optJSONObject(m) ?: continue
+                            val subscribeArr = modelObj.optJSONArray("subscribe") ?: JSONArray()
+                            for (s in 0 until subscribeArr.length()) {
+                                val addr = parseMeshAddress(subscribeArr.opt(s))
+                                if (addr != null && addr > 0) subs.add(addr)
+                            }
+                        }
+                    }
+
+                    out.add(
+                        mapOf(
+                            "unicastAddress" to unicast,
+                            "name" to name,
+                            "subscriptions" to subs.toList()
+                        )
+                    )
+                }
+
+                result.success(out)
+            } catch (e: Exception) {
+                android.util.Log.e("MeshPlugin", "getNodeSubscriptions error: ${e.message}", e)
+                result.success(emptyList<Map<String, Any>>())
+            }
         }
     }
 
@@ -479,11 +229,7 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             override fun onMeshPduCreated(pdu: ByteArray?) {
                 if (pdu != null) {
                     android.util.Log.d("MeshPlugin", "onMeshPduCreated: sending ${pdu.size} bytes via BLE proxy")
-                    rememberSentPdu(pdu)
                     bleManager?.sendPdu(pdu)
-                    // Persist sequence numbers so devices don't flag replay after app restarts.
-                    // Especially important for group dst, where Nordic SDK may not persist SRC sequence.
-                    persistProvisionerSequenceIfNeeded("onMeshPduCreated")
                 } else {
                     android.util.Log.w("MeshPlugin", "onMeshPduCreated: received null PDU")
                 }
@@ -502,10 +248,8 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 
                 when (meshMessage) {
                     is GenericOnOffStatus -> {
-                        lastStatusRxMs = android.os.SystemClock.elapsedRealtime()
                         val state = meshMessage.presentState
                         val targetState = meshMessage.targetState
-                        lastKnownOnOffState[src] = state
                         android.util.Log.d("MeshPlugin", "GenericOnOffStatus from 0x${src.toString(16)}: state=$state, target=$targetState")
                         
                         // Notify Dart layer about device status
@@ -526,31 +270,10 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             
             override fun onTransactionFailed(dst: Int, hasIncompleteTimerExpired: Boolean) {
                 android.util.Log.w("MeshPlugin", "Transaction failed for 0x${dst.toString(16)}")
-                maybeAutoRepairReplayAndRetry(dst)
             }
             
             override fun onUnknownPduReceived(src: Int, accessPayload: ByteArray?) {
-                val opcode = decodeOpcode(accessPayload)
-                val hex = bytesToHex(accessPayload)
-
-                 // Noise reduction: when we whitelist device unicasts in the proxy filter, some proxies
-                 // echo our own outbound access messages back to us. These commonly show up as
-                 // Unknown Access PDUs with src=provisioner and opcodes like 0x8201 (GenericOnOffGet).
-                 // They are not useful for UI state and drown out the real signal.
-                 val provisionerUnicast = getProvisionerUnicastOrNull() ?: 0x0001
-                 if (src == provisionerUnicast) {
-                     when (opcode) {
-                         0x8201, // GenericOnOffGet
-                         0x8202, // GenericOnOffSet
-                         0x8203, // GenericOnOffSetUnack
-                         -> return
-                     }
-                 }
-
-                android.util.Log.w(
-                    "MeshPlugin",
-                    "Unknown Access PDU from 0x${src.toString(16)} opcode=${opcode?.let { "0x" + it.toString(16) } ?: "?"} bytes=${accessPayload?.size ?: 0} payload=$hex"
-                )
+                android.util.Log.w("MeshPlugin", "Unknown PDU from 0x${src.toString(16)}, payload size: ${accessPayload?.size ?: 0}")
             }
             
             override fun onBlockAcknowledgementProcessed(dst: Int, message: no.nordicsemi.android.mesh.transport.ControlMessage) {
@@ -564,77 +287,8 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             }
             override fun onMessageDecryptionFailed(meshLayer: String?, errorMessage: String?) {
                 android.util.Log.e("MeshPlugin", "Decryption failed at $meshLayer: $errorMessage")
-                lastDecryptionFailureMs = android.os.SystemClock.elapsedRealtime()
             }
         })
-    }
-
-    private fun maybeAutoRepairReplayAndRetry(dst: Int) {
-        val pending = pendingUnicast ?: return
-        if (pending.dst != dst) return
-        if (!isValidUnicast(dst)) return
-        if (!isConnected) return
-
-        val now = android.os.SystemClock.elapsedRealtime()
-
-        // If we recently saw decryption failures, this is likely key/iv mismatch (seq bump won't help).
-        if (now - lastDecryptionFailureMs < 10_000) {
-            android.util.Log.w("MeshPlugin", "Skip auto replay repair: recent decryption failure")
-            return
-        }
-
-        // If we aren't receiving anything from the proxy, this is more likely connection/filter than replay.
-        if (now - lastRxPduMs > 12_000) {
-            android.util.Log.w("MeshPlugin", "Skip auto replay repair: no recent RX from proxy")
-            return
-        }
-
-        // Avoid rapid loops.
-        if (now - lastAutoReplayRepairMs < 8_000) return
-        if (pending.attempts >= 2) return
-
-        val network = meshNetwork ?: return
-        val provisioner = network.selectedProvisioner ?: network.provisioners.firstOrNull() ?: return
-        val provisionerAddress = provisioner.provisionerAddress ?: return
-
-        val current = network.sequenceNumbers.get(provisionerAddress, 0)
-        val maxSeq = 0xFFFFFF
-        val step = 200_000 * (pending.attempts + 1)
-        val target = maxOf(current + step, 3_000_000).coerceAtMost(maxSeq)
-
-        val seqs: SparseIntArray = network.sequenceNumbers
-        seqs.put(provisionerAddress, target)
-        network.setSequenceNumbers(seqs)
-        persistProvisionerSequenceNow("autoReplayRepair")
-
-        android.util.Log.w(
-            "MeshPlugin",
-            "Auto replay repair: bumped seq for 0x${provisionerAddress.toString(16)} $current -> $target; retrying dst=0x${dst.toString(16)}"
-        )
-
-        lastAutoReplayRepairMs = now
-
-        try {
-            val appKey = meshNetwork?.appKeys?.firstOrNull { it.keyIndex == 0 }
-                ?: meshNetwork?.appKeys?.firstOrNull()
-                ?: return
-
-            if (pending.isGet) {
-                val msg = GenericOnOffGet(appKey)
-                reserveNextProvisionerSequence("autoReplayRetry-get:0x${dst.toString(16)}")
-                meshManagerApi.createMeshPdu(dst, msg)
-                pendingUnicast = pending.copy(attempts = pending.attempts + 1)
-            } else {
-                val state = pending.state ?: return
-                val tId = Random.nextInt(256)
-                val msg = GenericOnOffSet(appKey, state, tId)
-                reserveNextProvisionerSequence("autoReplayRetry-set:0x${dst.toString(16)}")
-                meshManagerApi.createMeshPdu(dst, msg)
-                pendingUnicast = pending.copy(attempts = pending.attempts + 1)
-            }
-        } catch (e: Exception) {
-            android.util.Log.w("MeshPlugin", "Auto replay retry failed: ${e.message}")
-        }
     }
 
     private fun initialize(call: MethodCall, result: MethodChannel.Result) {
@@ -674,11 +328,36 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             }
 
             meshNetwork?.let { network ->
-                // Ensure we have a selected provisioner with an assigned address.
-                // This address becomes the SRC for access messages, and status replies are typically sent back to it.
-                val provisionerUnicast = ensureProvisionerAddress(network)
-                // Ensure provisioner has an associated node entry so its sequence number can be persisted.
-                network.selectedProvisioner?.let { network.updateProvisioner(it) }
+                // Ensure we have a provisioner (required for sending/receiving messages)
+                if (network.selectedProvisioner == null && network.provisioners.isEmpty()) {
+                    android.util.Log.d("MeshPlugin", "No provisioner found - creating default provisioner")
+                    val provisioner = network.createProvisioner("Kantmiss Provisioner")
+                    network.selectProvisioner(provisioner)
+                    android.util.Log.d("MeshPlugin", "Created and selected provisioner: ${provisioner.provisionerName}")
+                } else if (network.selectedProvisioner == null) {
+                    network.selectProvisioner(network.provisioners.first())
+                    android.util.Log.d("MeshPlugin", "Selected existing provisioner: ${network.selectedProvisioner?.provisionerName}")
+                }
+                
+                // CRITICAL: Add provisioner as a node so it can receive GenericOnOffStatus messages
+                val provisionerUnicast = 0x0001
+                val provisionerNode = network.nodes.firstOrNull { it.unicastAddress == provisionerUnicast }
+                if (provisionerNode == null) {
+                    android.util.Log.w("MeshPlugin", "Provisioner node not found! Creating stub node at 0x0001 with GenericOnOffClient")
+                    try {
+                        // Create a provisioner node using JSON import (hack but works)
+                        // The Nordic SDK doesn't have a public API to create nodes programmatically,
+                        // so we'll import a minimal node definition
+                        val success = createProvisionerNode(network, provisionerUnicast)
+                        if (!success) {
+                            android.util.Log.e("MeshPlugin", "Failed to create provisioner node - import failed")
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.e("MeshPlugin", "Failed to create provisioner node: ${e.message}", e)
+                    }
+                } else {
+                    android.util.Log.d("MeshPlugin", "Provisioner node already exists at 0x${provisionerUnicast.toString(16)}")
+                }
                 // Ensure mesh network keys match provided credentials.
                 // Important: Don't remove/re-add keys if they already match - this preserves sequence numbers
 
@@ -721,25 +400,10 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 }
 
                 // Log current sequence number status (for debugging)
-                val currentSeq = network.sequenceNumbers.get(provisionerUnicast, 0)
-                android.util.Log.i(
-                    "MeshPlugin",
-                    "Provisioner (0x${provisionerUnicast.toString(16)}) current sequence: $currentSeq (managed by Nordic SDK)"
-                )
-
-                // Persist the provisioner node after credential setup to ensure sequence survives restarts.
-                persistProvisionerSequenceIfNeeded("setMeshCredentials")
-
-                // Automatic replay mitigation:
-                // We can't read the device's replay cache, so we proactively ensure we never start from a low
-                // sequence number after an app restart.
-                // 24-bit max is 16,777,215, so 3,000,000 leaves plenty of headroom.
-                val persistedSeq = loadPersistedProvisionerSequence(network.meshUUID, provisionerUnicast)
-                val minimumSeq = maxOf(
-                    3_000_000 + Random.nextInt(10_000),
-                    (persistedSeq ?: 0) + 1_000
-                )
-                ensureMinimumProvisionerSequence(minimumSeq, "credentials")
+                // Provisioner typically uses 0x0001 as unicast address
+                val provisionerAddress = 0x0001
+                val currentSeq = network.sequenceNumbers.get(provisionerAddress, 0)
+                android.util.Log.i("MeshPlugin", "Provisioner (0x${provisionerAddress.toString(16)}) current sequence: $currentSeq (managed by Nordic SDK)")
 
                 android.util.Log.d("MeshPlugin", "Mesh network configured: nodes=${network.nodes.size}, groups=${network.groups.size}")
             }
@@ -784,13 +448,9 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 val connected = ensureProxyConnection(mac)
                 
                 if (connected && deviceUnicasts.isNotEmpty()) {
-                    // Required so inbound messages from these sources will be decrypted/parsed.
-                    ensureDebugNodesForUnicasts(deviceUnicasts + listOfNotNull(currentProxyUnicast))
                     // Configure proxy filter after connection
                     android.util.Log.d("MeshPlugin", "Configuring proxy filter for ${deviceUnicasts.size} devices")
-                    // Include the default group address so we can receive group publications (e.g. status updates).
-                    // Echoes are already filtered by isEchoOfRecentlySent().
-                    configureProxyFilterInternal(deviceUnicasts, includeDefaultGroup = true)
+                    configureProxyFilterInternal(deviceUnicasts)
                 }
                 
                 result.success(connected)
@@ -881,35 +541,28 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                     }
                 }
                 
-                // Determine which nodes we can query for status.
-                // Flutter may omit MACs for group triggers; fall back to cached unicasts.
-                val derivedUnicastsFromMacs = macs?.mapNotNull { mac ->
-                    val unicast = macToUnicast(mac)
-                    if (unicast != null) {
-                        android.util.Log.d("MeshPlugin", "MAC $mac → unicast 0x${unicast.toString(16)}")
+                // CRITICAL: Configure proxy filter to receive responses
+                if (!proxyFilterConfigured && !macs.isNullOrEmpty()) {
+                    android.util.Log.d("MeshPlugin", "Configuring proxy filter for ${macs.size} devices (MACs: ${macs.joinToString(", ")})")
+                    // Calculate unicast addresses from MACs
+                    val deviceUnicasts = macs.mapNotNull { mac ->
+                        try {
+                            val unicast = macToUnicast(mac)
+                            if (unicast != null) {
+                                android.util.Log.d("MeshPlugin", "MAC $mac → unicast 0x${unicast.toString(16)}")
+                            }
+                            unicast
+                        } catch (e: Exception) {
+                            android.util.Log.w("MeshPlugin", "Failed to parse MAC $mac: ${e.message}")
+                            null
+                        }
                     }
-                    unicast
-                } ?: emptyList()
-                val deviceUnicastsForThisSend = if (derivedUnicastsFromMacs.isNotEmpty()) {
-                    derivedUnicastsFromMacs
-                } else {
-                    lastKnownDeviceUnicasts.toList()
-                }
-
-                // Required so inbound messages from these sources will be decrypted/parsed.
-                ensureDebugNodesForUnicasts(deviceUnicastsForThisSend + listOfNotNull(currentProxyUnicast))
-
-                // CRITICAL: Configure proxy filter to receive responses.
-                if ((!proxyFilterConfigured || lastProxyFilterAddresses.isEmpty()) && deviceUnicastsForThisSend.isNotEmpty()) {
-                    android.util.Log.d(
-                        "MeshPlugin",
-                        "Configuring proxy filter for ${deviceUnicastsForThisSend.size} devices"
-                    )
-                    // Include the group address so we can receive status publications that are sent to the group.
-                    configureProxyFilterInternal(deviceUnicastsForThisSend, includeDefaultGroup = true)
+                    if (deviceUnicasts.isNotEmpty()) {
+                        configureProxyFilterInternal(deviceUnicasts, extraGroupAddresses = listOf(groupId))
+                    }
                 }
                 
-                android.util.Log.d("MeshPlugin", "Creating mesh PDU for group $groupId (0x${groupId.toString(16)}) (unacknowledged)")
+                android.util.Log.d("MeshPlugin", "Creating mesh PDU for group $groupId (0x${groupId.toString(16)}) with ACK")
                 
                 // Diagnostic: Check mesh network configuration
                 meshNetwork?.let { network ->
@@ -923,22 +576,14 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                     }
                 }
                 
-                val appKey = meshNetwork?.appKeys?.firstOrNull { it.keyIndex == 0 }
-                    ?: meshNetwork?.appKeys?.firstOrNull()
-                appKey?.let { appKey ->
+                meshNetwork?.appKeys?.firstOrNull()?.let { appKey ->
                     val tId = Random.nextInt(256)
-                    // For group destinations, use *unacknowledged* SET to avoid response storms and
-                    // to better match how most firmwares are configured.
-                    val message = GenericOnOffSetUnacknowledged(appKey, on, tId)
-                    android.util.Log.d("MeshPlugin", "GenericOnOffSetUnacknowledged: state=$on, tId=$tId")
+                    // GenericOnOffSet opcode 0x8202 is inherently acknowledged (vs 0x8203 unacknowledged)
+                    val message = GenericOnOffSet(appKey, on, tId)
+                    android.util.Log.d("MeshPlugin", "GenericOnOffSet: state=$on, tId=$tId (acknowledged by opcode)")
                     // This will trigger onMeshPduCreated callback which sends via bleManager
-                    reserveNextProvisionerSequence("groupSetUnack:0x${groupId.toString(16)}")
                     meshManagerApi.createMeshPdu(groupId, message)
                     android.util.Log.d("MeshPlugin", "createMeshPdu completed successfully")
-
-                    // Always poll unicasts after a trigger so UI state is refreshed based on Mesh status responses.
-                    // For the typical "momentary on" behavior, stop once a device reports OFF.
-                    startOnOffPollingAfterTrigger(deviceUnicastsForThisSend, stopWhenOff = true)
                     result.success(true)
                 } ?: run {
                     android.util.Log.e("MeshPlugin", "No app key configured in mesh network")
@@ -958,15 +603,12 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                     ?: throw IllegalArgumentException("Group address required")
                 val state = call.argument<Boolean>("state") ?: true
 
-                val appKey = meshNetwork?.appKeys?.firstOrNull { it.keyIndex == 0 }
-                    ?: meshNetwork?.appKeys?.firstOrNull()
-                appKey?.let { appKey ->
+                meshNetwork?.appKeys?.firstOrNull()?.let { appKey ->
                     val tId = Random.nextInt(256)
                     // Use acknowledged Set so we can count/respond to GenericOnOffStatus (PRD FR-3.3.4)
                     val message = GenericOnOffSet(appKey, state, tId)
                     android.util.Log.d("MeshPlugin", "GenericOnOffSet(ACK): groupAddress=0x${groupAddress.toString(16)}, state=$state, tId=$tId")
                     // Send to group address - meshManagerApi will call onMeshPduCreated callback
-                    reserveNextProvisionerSequence("triggerGroup-ack:0x${groupAddress.toString(16)}")
                     meshManagerApi.createMeshPdu(groupAddress, message)
                     
                     result.success(true)
@@ -1046,16 +688,12 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
 
                 // Ensure proxy filter includes the group + expected responders (TECHNICAL: proxy drops otherwise)
                 if (deviceUnicasts.isNotEmpty()) {
-                    ensureDebugNodesForUnicasts(deviceUnicasts + listOfNotNull(currentProxyUnicast))
-                    configureProxyFilterInternal(deviceUnicasts, includeDefaultGroup = true)
+                    configureProxyFilterInternal(deviceUnicasts, extraGroupAddresses = listOf(groupAddress))
                 }
                 
-                val appKey = meshNetwork?.appKeys?.firstOrNull { it.keyIndex == 0 }
-                    ?: meshNetwork?.appKeys?.firstOrNull()
-                appKey?.let { appKey ->
+                meshNetwork?.appKeys?.firstOrNull()?.let { appKey ->
                     val message = GenericOnOffGet(appKey)
                     android.util.Log.d("MeshPlugin", "Sending GenericOnOffGet to group 0x${groupAddress.toString(16)}")
-                    reserveNextProvisionerSequence("discoverGroupMembers-get:0x${groupAddress.toString(16)}")
                     meshManagerApi.createMeshPdu(groupAddress, message)
                     
                     // Return immediately - status messages will arrive via onMeshMessageReceived callback
@@ -1075,9 +713,8 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             try {
                 val deviceUnicasts = call.argument<List<Int>>("deviceUnicasts")
                     ?: throw IllegalArgumentException("deviceUnicasts required")
-
-                val includeGroup = call.argument<Boolean>("includeGroup") ?: false
-                configureProxyFilterInternal(deviceUnicasts, includeDefaultGroup = includeGroup)
+                
+                configureProxyFilterInternal(deviceUnicasts)
                 result.success(true)
             } catch (e: Exception) {
                 android.util.Log.e("MeshPlugin", "configureProxyFilter error: ${e.message}", e)
@@ -1090,34 +727,21 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
      * Configure the proxy filter to forward status messages for specific device unicast addresses.
      * This is CRITICAL - without this, the proxy drops all incoming status messages.
      */
-    private fun configureProxyFilterInternal(deviceUnicasts: List<Int>, includeDefaultGroup: Boolean = true) {
+    private fun configureProxyFilterInternal(deviceUnicasts: List<Int>, extraGroupAddresses: List<Int> = emptyList()) {
         if (!isConnected) {
             android.util.Log.w("MeshPlugin", "Cannot configure filter: not connected to proxy")
             return
         }
 
-        if (deviceUnicasts.isNotEmpty()) {
-            lastKnownDeviceUnicasts = deviceUnicasts.toSet()
-        }
-
-        // Optional: include the default group address so we can receive published statuses to the group.
-        // NOTE: including the group also causes the proxy to forward our own group messages back to us (echo).
+        // Proxy filtering is based on destination addresses.
+        // Always include the provisioner (so replies addressed to us are forwarded) and Default group.
+        // Include extra group addresses for current operations, and include device unicasts because
+        // some firmwares publish status to unicast (not to the group / provisioner).
         val defaultGroupAddress = 0xC000
-        // Use the *actual* selected provisioner address; status replies are typically destined here.
-        val provisionerUnicast = meshNetwork?.let { network ->
-            network.selectedProvisioner?.provisionerAddress
-                ?: network.provisioners.firstOrNull()?.provisionerAddress
-        } ?: 0x0001
-        // NOTE:
-        // Some proxy implementations appear to behave better when the expected destination addresses
-        // are included in the filter (even though the spec defines it for server->client forwarding).
-        // In practice, including device unicasts has been required for reliable operation here.
-        val base = if (includeDefaultGroup) listOf(provisionerUnicast, defaultGroupAddress) else listOf(provisionerUnicast)
-        val desiredAddresses = (base + deviceUnicasts).distinct().toSet()
-
-        // Ensure we can decrypt/parse messages originating from these devices.
-        // (Group addresses are not nodes; skip non-unicast addresses.)
-        ensureDebugNodesForUnicasts(deviceUnicasts + listOfNotNull(currentProxyUnicast))
+        val provisionerUnicast = 0x0001
+        val desiredAddresses = (listOf(provisionerUnicast, defaultGroupAddress) + extraGroupAddresses + deviceUnicasts)
+            .distinct()
+            .toSet()
 
         if (proxyFilterConfigured && desiredAddresses == lastProxyFilterAddresses) {
             android.util.Log.d("MeshPlugin", "Proxy filter already configured for same address set")
@@ -1127,7 +751,7 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         try {
             android.util.Log.d(
                 "MeshPlugin",
-                "Configuring proxy filter for ${desiredAddresses.size} addresses (prov=0x${provisionerUnicast.toString(16)}, includeGroup=$includeDefaultGroup)"
+                "Configuring proxy filter for ${desiredAddresses.size} addresses (prov=0x${provisionerUnicast.toString(16)}, group=0x${defaultGroupAddress.toString(16)})"
             )
             
             // Find the proxy node in the mesh network
@@ -1149,16 +773,11 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 
                 // Step 1: Set filter type to WHITELIST (INCLUSION_LIST)
                 val filterSetup = ProxyConfigSetFilterType(ProxyFilterType(ProxyFilterType.INCLUSION_LIST_FILTER))
-                reserveNextProvisionerSequence("proxyFilter:fallback:setType")
                 meshManagerApi.createMeshPdu(targetUnicast, filterSetup)
                 android.util.Log.d("MeshPlugin", "Sent ProxyConfigSetFilterType(INCLUSION_LIST) to 0x${targetUnicast.toString(16)}")
                 
-                // Step 2: Add addresses.
-                // NOTE: Work around a known length-calculation bug in the upstream Nordic
-                // ProxyConfigAddAddressToFilter implementation (it may pad with zeros and some
-                // devices reject it with "Failed to decode Proxy Configuration (err -22)").
-                // Sending 1 address per message avoids the malformed length.
-                val batches = desiredAddresses.toList().chunked(1)
+                // Step 2: Add device addresses in batches (max ~10 per message)
+                val batches = desiredAddresses.toList().chunked(10)
                 for (batch in batches) {
                     val addressList = batch.map { addr ->
                         val b1 = ((addr shr 8) and 0xFF).toByte()
@@ -1166,7 +785,6 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                         AddressArray(b1, b2)
                     }
                     val addAddresses = ProxyConfigAddAddressToFilter(addressList)
-                    reserveNextProvisionerSequence("proxyFilter:fallback:add")
                     meshManagerApi.createMeshPdu(targetUnicast, addAddresses)
                     android.util.Log.d("MeshPlugin", "Added ${batch.size} addresses to filter: ${batch.map { "0x" + it.toString(16) }.joinToString(", ")}")
                 }
@@ -1177,12 +795,11 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 
                 // Step 1: Set filter type to WHITELIST (INCLUSION_LIST)
                 val filterSetup = ProxyConfigSetFilterType(ProxyFilterType(ProxyFilterType.INCLUSION_LIST_FILTER))
-                reserveNextProvisionerSequence("proxyFilter:setType")
                 meshManagerApi.createMeshPdu(targetUnicast, filterSetup)
                 android.util.Log.d("MeshPlugin", "Sent ProxyConfigSetFilterType(INCLUSION_LIST)")
                 
-                // Step 2: Add addresses (1 per message) to avoid malformed ProxyConfigAddAddressToFilter payload lengths.
-                val batches = desiredAddresses.toList().chunked(1)
+                // Step 2: Add device addresses in batches
+                val batches = desiredAddresses.toList().chunked(10)
                 for (batch in batches) {
                     val addressList = batch.map { addr ->
                         val b1 = ((addr shr 8) and 0xFF).toByte()
@@ -1190,7 +807,6 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                         AddressArray(b1, b2)
                     }
                     val addAddresses = ProxyConfigAddAddressToFilter(addressList)
-                    reserveNextProvisionerSequence("proxyFilter:add")
                     meshManagerApi.createMeshPdu(targetUnicast, addAddresses)
                     android.util.Log.d("MeshPlugin", "Added ${batch.size} addresses to filter: ${batch.map { "0x" + it.toString(16) }.joinToString(", ")}")
                 }
@@ -1198,7 +814,7 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             
             proxyFilterConfigured = true
             lastProxyFilterAddresses = desiredAddresses
-            android.util.Log.i("MeshPlugin", "✓ Proxy filter configured for ${deviceUnicasts.size} devices")
+            android.util.Log.i("MeshPlugin", "✓ Proxy filter configured for ${deviceUnicasts.size} devices (extraGroups=${extraGroupAddresses.size})")
             
         } catch (e: Exception) {
             android.util.Log.e("MeshPlugin", "Failed to configure proxy filter", e)
@@ -1231,22 +847,10 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                     return@launch
                 }
                 
-                val appKey = meshNetwork?.appKeys?.firstOrNull { it.keyIndex == 0 }
-                    ?: meshNetwork?.appKeys?.firstOrNull()
-                appKey?.let { appKey ->
+                meshNetwork?.appKeys?.firstOrNull()?.let { appKey ->
                     val tId = Random.nextInt(256)
                     val message = GenericOnOffSet(appKey, state, tId)
                     android.util.Log.d("MeshPlugin", "GenericOnOffSet unicast: dst=0x${unicastAddress.toString(16)}, tId=$tId")
-
-                    pendingUnicast = PendingUnicast(
-                        dst = unicastAddress,
-                        state = state,
-                        isGet = false,
-                        createdAtMs = android.os.SystemClock.elapsedRealtime(),
-                        attempts = 0
-                    )
-
-                    reserveNextProvisionerSequence("unicastSet:0x${unicastAddress.toString(16)}")
                     meshManagerApi.createMeshPdu(unicastAddress, message)
                     result.success(true)
                 } ?: run {
@@ -1282,20 +886,8 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                     return@launch
                 }
 
-                val appKey = meshNetwork?.appKeys?.firstOrNull { it.keyIndex == 0 }
-                    ?: meshNetwork?.appKeys?.firstOrNull()
-                appKey?.let { appKey ->
+                meshNetwork?.appKeys?.firstOrNull()?.let { appKey ->
                     val message = GenericOnOffGet(appKey)
-
-                    pendingUnicast = PendingUnicast(
-                        dst = unicastAddress,
-                        state = null,
-                        isGet = true,
-                        createdAtMs = android.os.SystemClock.elapsedRealtime(),
-                        attempts = 0
-                    )
-
-                    reserveNextProvisionerSequence("unicastGet:0x${unicastAddress.toString(16)}")
                     meshManagerApi.createMeshPdu(unicastAddress, message)
                     result.success(true)
                 } ?: run {
@@ -1334,47 +926,6 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
     }
 
     /**
-     * If devices log replay errors (e.g. "Replay: src 0x0001 ..."), the mesh stack is rejecting
-     * our messages because the source address is reusing an old (too-low) sequence number.
-     *
-     * This method bumps the provisioner sequence number to a high watermark and persists it.
-     *
-     * Args:
-     * - targetSeq (optional): desired minimum sequence number (default 1,000,000)
-     */
-    private fun repairReplayProtection(call: MethodCall, result: MethodChannel.Result) {
-        try {
-            val network = meshNetwork ?: throw IllegalStateException("Mesh network not loaded")
-            val provisionerAddress = ensureProvisionerAddress(network)
-            val provisioner = network.selectedProvisioner ?: throw IllegalStateException("No provisioner selected")
-
-            val targetSeq = call.argument<Int>("targetSeq") ?: 1_000_000
-            if (targetSeq < 0) throw IllegalArgumentException("targetSeq must be >= 0")
-
-            val current = network.sequenceNumbers.get(provisionerAddress, 0)
-            val bumped = maxOf(current, targetSeq)
-
-            val seqs: SparseIntArray = network.sequenceNumbers
-            seqs.put(provisionerAddress, bumped)
-            network.setSequenceNumbers(seqs)
-            network.updateProvisioner(provisioner)
-
-            android.util.Log.w(
-                "MeshPlugin",
-                "Replay repair: provisioner 0x${provisionerAddress.toString(16)} seq $current -> $bumped"
-            )
-            result.success(mapOf(
-                "provisionerAddress" to provisionerAddress,
-                "previousSeq" to current,
-                "newSeq" to bumped
-            ))
-        } catch (e: Exception) {
-            android.util.Log.e("MeshPlugin", "repairReplayProtection failed", e)
-            result.error("REPLAY_REPAIR_ERROR", e.message, null)
-        }
-    }
-
-    /**
      * BLE Manager for Mesh Proxy connections
      * Based on Nordic's BleMeshManager sample implementation
      */
@@ -1382,8 +933,11 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         private var proxyDataIn: BluetoothGattCharacteristic? = null
         private var proxyDataOut: BluetoothGattCharacteristic? = null
         private var batteryLevelChar: BluetoothGattCharacteristic? = null
-        private var hasProxyChars: Boolean = false
-        private var connectionReadySignaled: Boolean = false
+
+        // BLE Mesh Proxy PDUs may be segmented across multiple notifications.
+        // Reassemble segments (SAR=First/Continuation/Last) into a complete PDU.
+        private var rxProxyPduType: Int? = null
+        private var rxProxyPduBuffer: ByteArrayOutputStream? = null
         
         // Callback to notify when connection is ready
         var onConnectionReady: (() -> Unit)? = null
@@ -1411,128 +965,112 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 }
 
                 // Accept connection even without proxy service - we'll report error later if needed
-                hasProxyChars = this@MeshBleManager.proxyDataIn != null && this@MeshBleManager.proxyDataOut != null
+                val hasProxyChars = this@MeshBleManager.proxyDataIn != null && this@MeshBleManager.proxyDataOut != null
                 android.util.Log.d("MeshPlugin", "isRequiredServiceSupported returning: true (hasProxyChars=$hasProxyChars)")
                 return true // Always accept connection to see what services are available
             }
 
             override fun initialize() {
                 android.util.Log.d("MeshPlugin", "BleManager.initialize() called")
-                connectionReadySignaled = false
-
-                if (!hasProxyChars || proxyDataIn == null || proxyDataOut == null) {
-                    android.util.Log.e(
-                        "MeshPlugin",
-                        "Mesh Proxy service/characteristics missing; failing proxy connection"
-                    )
-                    this@MeshPlugin.isConnected = false
-                    onConnectionFailed?.invoke()
-                    disconnect().enqueue()
-                    return
-                }
-
-                val char = proxyDataOut!!
-                android.util.Log.d("MeshPlugin", "Enabling notifications on proxy data out")
-                val onDataReceived = DataReceivedCallback { _, data ->
-                    val bytes = data.value ?: byteArrayOf()
-                    lastRxPduMs = android.os.SystemClock.elapsedRealtime()
-                    val verbose = isVerboseLoggingEnabled()
-                    if (verbose) {
+                requestMtu(517).enqueue()
+                
+                proxyDataOut?.let { char ->
+                    android.util.Log.d("MeshPlugin", "Enabling notifications on proxy data out")
+                    val onDataReceived = DataReceivedCallback { device, data ->
+                        val bytes = data.value ?: byteArrayOf()
                         val hexString = bytes.joinToString(" ") { "%02X".format(it) }
                         android.util.Log.d("MeshPlugin", "Received ${bytes.size} bytes from proxy: $hexString")
-                    }
+                        
+                        if (bytes.isEmpty()) return@DataReceivedCallback
 
-                    // Log PDU type for debugging
-                    var msgType: Int? = null
-                    if (bytes.isNotEmpty()) {
-                        val hdr = bytes[0].toInt() and 0xFF
-                        val sar = (hdr ushr 6) and 0x03
-                        msgType = hdr and 0x3F
-                        if (verbose) {
-                            val sarStr = when (sar) {
-                                0 -> "complete"
-                                1 -> "first"
-                                2 -> "continuation"
-                                3 -> "last"
-                                else -> "?"
+                        val header = bytes[0].toInt() and 0xFF
+                        val sar = (header ushr 6) and 0x03
+                        val pduType = header and 0x3F
+
+                        // Log PDU type for debugging (type is lower 6 bits; SAR is upper 2).
+                        when (pduType) {
+                            0x00 -> android.util.Log.i("MeshPlugin", "↓ Network PDU (sar=$sar)")
+                            0x01 -> android.util.Log.d("MeshPlugin", "↓ Mesh beacon (sar=$sar)")
+                            0x02 -> android.util.Log.d("MeshPlugin", "↓ Proxy configuration (sar=$sar)")
+                            0x03 -> android.util.Log.d("MeshPlugin", "↓ Provisioning PDU (sar=$sar)")
+                            else -> android.util.Log.d("MeshPlugin", "↓ Unknown Proxy PDU type=0x${pduType.toString(16)} (sar=$sar)")
+                        }
+
+                        fun deliverToSdk(fullPdu: ByteArray) {
+                            if (fullPdu.isEmpty()) return
+                            // Only deliver Network PDUs to avoid Nordic SDK crashes when parsing
+                            // Proxy Configuration PDUs (observed NPE in DefaultNoOperationMessageState).
+                            val fullType = fullPdu[0].toInt() and 0x3F
+                            if (fullType != 0x00) return
+                            try {
+                                meshManagerApi.handleNotifications(getGattMtu(), fullPdu)
+                            } catch (e: Exception) {
+                                android.util.Log.e("MeshPlugin", "handleNotifications failed (ignored): ${e.message}", e)
                             }
-                            when (msgType) {
-                                0x00 -> android.util.Log.i("MeshPlugin", "↓ Network PDU (SAR=$sarStr)")
-                                0x01 -> android.util.Log.d("MeshPlugin", "↓ Mesh beacon (SAR=$sarStr)")
-                                0x02 -> android.util.Log.d("MeshPlugin", "↓ Proxy configuration (SAR=$sarStr)")
-                                0x03 -> android.util.Log.d("MeshPlugin", "↓ Provisioning PDU (SAR=$sarStr)")
-                                else -> android.util.Log.d("MeshPlugin", "↓ Proxy PDU type=0x${msgType.toString(16)} (SAR=$sarStr)")
+                        }
+
+                        when (sar) {
+                            0 -> {
+                                // Complete PDU
+                                deliverToSdk(bytes)
+                            }
+                            1 -> {
+                                // First segment
+                                rxProxyPduType = pduType
+                                rxProxyPduBuffer = ByteArrayOutputStream().apply {
+                                    if (bytes.size > 1) write(bytes, 1, bytes.size - 1)
+                                }
+                            }
+                            2 -> {
+                                // Continuation segment
+                                if (rxProxyPduType == pduType && rxProxyPduBuffer != null) {
+                                    if (bytes.size > 1) rxProxyPduBuffer?.write(bytes, 1, bytes.size - 1)
+                                } else {
+                                    // Unexpected continuation; reset.
+                                    rxProxyPduType = null
+                                    rxProxyPduBuffer = null
+                                }
+                            }
+                            3 -> {
+                                // Last segment
+                                if (rxProxyPduType == pduType && rxProxyPduBuffer != null) {
+                                    if (bytes.size > 1) rxProxyPduBuffer?.write(bytes, 1, bytes.size - 1)
+                                    val payload = rxProxyPduBuffer?.toByteArray() ?: byteArrayOf()
+                                    val completeHeader = (0 shl 6) or (pduType and 0x3F)
+                                    val full = ByteArray(1 + payload.size)
+                                    full[0] = completeHeader.toByte()
+                                    if (payload.isNotEmpty()) {
+                                        System.arraycopy(payload, 0, full, 1, payload.size)
+                                    }
+                                    deliverToSdk(full)
+                                }
+                                rxProxyPduType = null
+                                rxProxyPduBuffer = null
                             }
                         }
                     }
-
-                    // Workaround: Nordic Mesh Android SDK may throw NPE while parsing inbound Proxy Configuration PDUs.
-                    // We don't currently rely on inbound proxy-config responses, so we can safely ignore them.
-                    // Keep Network PDUs (0x00) and beacons (0x01) flowing into the stack.
-                    if (msgType != null && msgType != 0x00 && msgType != 0x01) {
-                        if (verbose) {
-                            android.util.Log.d(
-                                "MeshPlugin",
-                                "Skipping handleNotifications for non-network PDU type=0x${msgType.toString(16)}"
-                            )
-                        }
-                        return@DataReceivedCallback
-                    }
-
-                    // Nordic Mesh expects the negotiated ATT MTU.
-                    // Noise reduction: skip feeding echoed PDUs back into the stack.
-                    val isNetworkPdu = bytes.isNotEmpty() && ((bytes[0].toInt() and 0x3F) == 0x00)
-                    if (isNetworkPdu && isEchoOfRecentlySent(bytes)) {
-                        if (verbose) {
-                            android.util.Log.i("MeshPlugin", "↩︎ Echoed Network PDU (skipping handleNotifications)")
-                        }
-                        return@DataReceivedCallback
-                    }
-                    try {
-                        meshManagerApi.handleNotifications(getGattMtu(), bytes)
-                    } catch (e: Exception) {
-                        android.util.Log.e(
-                            "MeshPlugin",
-                            "handleNotifications threw for ${bytes.size} bytes: ${e.message}",
-                            e
-                        )
-                    }
+                    setNotificationCallback(char).with(onDataReceived)
+                    enableNotifications(char).enqueue()
+                } ?: run {
+                    android.util.Log.w("MeshPlugin", "No proxy data out characteristic - device not configured as mesh proxy")
                 }
-                setNotificationCallback(char).with(onDataReceived)
-
-                beginAtomicRequestQueue()
-                    .add(requestMtu(517))
-                    .add(enableNotifications(char))
-                    .done {
-                        android.util.Log.d("MeshPlugin", "Proxy notifications enabled; connection ready")
-                        this@MeshPlugin.isConnected = true
-                        this@MeshPlugin.proxyFilterConfigured = false
-                        this@MeshPlugin.lastProxyFilterAddresses = emptySet()
-                        connectionReadySignaled = true
-                        onConnectionReady?.invoke()
-                    }
-                    .fail { _, status ->
-                        android.util.Log.e("MeshPlugin", "Failed to enable proxy notifications: $status")
-                        this@MeshPlugin.isConnected = false
-                        if (!connectionReadySignaled) onConnectionFailed?.invoke()
-                    }
-                    .enqueue()
-
+                
+                // Always call ready even if mesh proxy service not found
+                // This allows us to still use the device for other GATT operations
                 android.util.Log.d("MeshPlugin", "BleManager.initialize() completed")
             }
             
             override fun onDeviceReady() {
                 super.onDeviceReady()
-                android.util.Log.d("MeshPlugin", "BLE device ready")
+                android.util.Log.d("MeshPlugin", "BLE device ready - proxy connection established")
+                this@MeshPlugin.isConnected = true
+                onConnectionReady?.invoke()
             }
             
             override fun onDeviceDisconnected() {
                 super.onDeviceDisconnected()
                 android.util.Log.d("MeshPlugin", "BLE device disconnected")
                 this@MeshPlugin.isConnected = false
-                this@MeshPlugin.proxyFilterConfigured = false
-                this@MeshPlugin.lastProxyFilterAddresses = emptySet()
-                if (!connectionReadySignaled) onConnectionFailed?.invoke()
             }
 
             override fun onServicesInvalidated() {
@@ -1547,28 +1085,13 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 android.util.Log.w("MeshPlugin", "sendPdu: not connected, cannot send ${pdu.size} bytes")
                 return
             }
-
-            rememberSentPdu(pdu)
-
-            val verbose = isVerboseLoggingEnabled()
-            if (verbose) {
-                if (pdu.isNotEmpty()) {
-                    when (pdu[0].toInt() and 0xFF) {
-                        0x00 -> android.util.Log.d("MeshPlugin", "TX Network PDU ${pdu.size} bytes: ${bytesToHex(pdu)}")
-                        0x01 -> android.util.Log.d("MeshPlugin", "TX Mesh beacon ${pdu.size} bytes")
-                        0x02 -> android.util.Log.d("MeshPlugin", "TX Proxy configuration ${pdu.size} bytes")
-                        0x03 -> android.util.Log.d("MeshPlugin", "TX Provisioning PDU ${pdu.size} bytes")
-                    }
-                }
-                android.util.Log.d("MeshPlugin", "sendPdu: sending ${pdu.size} bytes to proxy device")
-            }
+            
+            android.util.Log.d("MeshPlugin", "sendPdu: sending ${pdu.size} bytes to proxy device")
             proxyDataIn?.let { char ->
                 writeCharacteristic(char, pdu, BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE)
                     .split()
                     .enqueue()
-                if (verbose) {
-                    android.util.Log.d("MeshPlugin", "sendPdu: write enqueued successfully")
-                }
+                android.util.Log.d("MeshPlugin", "sendPdu: write enqueued successfully")
             } ?: run {
                 android.util.Log.e("MeshPlugin", "sendPdu: proxyDataIn characteristic is null!")
             }
@@ -1590,6 +1113,135 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                     .enqueue()
             }
             return level
+        }
+    }
+    
+    /**
+     * Creates a provisioner node with GenericOnOffClient model.
+     * This is necessary to receive GenericOnOffStatus messages from devices.
+     * 
+     * Workaround: We'll use the MeshManagerApi to export and re-import the network
+     * with the provisioner node included.
+     * 
+     * @return true if successful, false otherwise
+     */
+    private fun createProvisionerNode(network: no.nordicsemi.android.mesh.MeshNetwork, unicastAddress: Int): Boolean {
+        try {
+            val provisioner = network.selectedProvisioner ?: network.provisioners.firstOrNull()
+            if (provisioner == null) {
+                android.util.Log.e("MeshPlugin", "Cannot create provisioner node: no provisioner selected")
+                return false
+            }
+            
+            // Export current mesh network to JSON
+            val networkJson = meshManagerApi.exportMeshNetwork()
+            if (networkJson == null) {
+                android.util.Log.e("MeshPlugin", "Failed to export mesh network")
+                return false
+            }
+            
+            android.util.Log.d("MeshPlugin", "Exported mesh network for modification")
+            
+            // Parse JSON and add provisioner node
+            val jsonObject = org.json.JSONObject(networkJson)
+            val nodesArray = jsonObject.optJSONArray("nodes") ?: org.json.JSONArray()
+            
+            // Check if provisioner node already exists in JSON
+            var provisionerExists = false
+            for (i in 0 until nodesArray.length()) {
+                val node = nodesArray.getJSONObject(i)
+                if (node.optInt("unicastAddress") == unicastAddress) {
+                    provisionerExists = true
+                    android.util.Log.d("MeshPlugin", "Provisioner node already exists in JSON at index $i")
+                    break
+                }
+            }
+            
+            if (!provisionerExists) {
+                // Add provisioner node to JSON
+                val provisionerNodeJson = org.json.JSONObject().apply {
+                    put("UUID", provisioner.provisionerUuid.toString().uppercase())
+                    put("unicastAddress", unicastAddress)
+                    put("deviceKey", "00000000000000000000000000000000")
+                    put("security", "high")
+                    put("netKeys", org.json.JSONArray().put(org.json.JSONObject().apply {
+                        put("index", 0)
+                        put("updated", false)
+                    }))
+                    put("configComplete", true)
+                    put("name", "Provisioner Node")
+                    put("cid", "0059")
+                    put("pid", "0000")
+                    put("vid", "0000")
+                    put("crpl", "0000")
+                    put("features", org.json.JSONObject().apply {
+                        put("relay", 0)
+                        put("proxy", 0)
+                        put("friend", 0)
+                        put("lowPower", 0)
+                    })
+                    put("elements", org.json.JSONArray().put(org.json.JSONObject().apply {
+                        put("name", "Primary Element")
+                        put("elementAddress", unicastAddress)
+                        put("location", "0000")
+                        put("models", org.json.JSONArray().apply {
+                            // Configuration Server (required)
+                            put(org.json.JSONObject().apply {
+                                put("modelId", "0000")
+                                put("subscribe", org.json.JSONArray())
+                                put("bind", org.json.JSONArray())
+                            })
+                            // Health Server (required)
+                            put(org.json.JSONObject().apply {
+                                put("modelId", "0002")
+                                put("subscribe", org.json.JSONArray())
+                                put("bind", org.json.JSONArray())
+                            })
+                            // GenericOnOffClient (for receiving status messages)
+                            put(org.json.JSONObject().apply {
+                                put("modelId", "1001")
+                                put("subscribe", org.json.JSONArray())
+                                put("bind", org.json.JSONArray().put(0))
+                            })
+                        })
+                    }))
+                }
+                
+                nodesArray.put(provisionerNodeJson)
+                jsonObject.put("nodes", nodesArray)
+                
+                android.util.Log.i("MeshPlugin", "Added provisioner node to mesh network JSON")
+                
+                // Re-import the modified network
+                val modifiedJson = jsonObject.toString()
+                android.util.Log.d("MeshPlugin", "Modified JSON (first 500 chars): ${modifiedJson.take(500)}")
+                
+                try {
+                    meshManagerApi.importMeshNetworkJson(modifiedJson)
+                    meshNetwork = meshManagerApi.meshNetwork
+                    android.util.Log.d("MeshPlugin", "Import completed, checking for node...")
+                } catch (e: Exception) {
+                    android.util.Log.e("MeshPlugin", "Exception during import: ${e.message}", e)
+                    return false
+                }
+                
+                // Verify the node was added
+                val verifyNode = meshNetwork?.nodes?.firstOrNull { it.unicastAddress == unicastAddress }
+                if (verifyNode != null) {
+                    android.util.Log.i("MeshPlugin", "✓ Successfully imported mesh network with provisioner node!")
+                    return true
+                } else {
+                    android.util.Log.e("MeshPlugin", "Failed to import modified mesh network - node not found after import")
+                    android.util.Log.d("MeshPlugin", "Current nodes in network: ${meshNetwork?.nodes?.map { "0x${it.unicastAddress.toString(16)}" }}")
+                    return false
+                }
+            }
+            
+            return true // Node already exists
+            
+        } catch (e: Exception) {
+            android.util.Log.e("MeshPlugin", "Error creating provisioner node: ${e.message}", e)
+            return false
         }
     }
 }

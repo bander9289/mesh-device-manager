@@ -60,6 +60,9 @@ class DeviceManager extends ChangeNotifier {
   StreamSubscription<_OnOffStatusEvent>? _activeTriggerStatusSubscription;
   Timer? _activeTriggerStatusTimer;
 
+  static const Duration _kTriggerStatusMonitorTimeout = Duration(seconds: 40);
+  static const Duration _kTriggerQuickAckTimeout = Duration(seconds: 2);
+
   // UI-selected group id (used for post-scan mesh refresh).
   int _activeUiGroupId = 0xC000;
   bool _postScanMeshRefreshInProgress = false;
@@ -203,6 +206,18 @@ class DeviceManager extends ChangeNotifier {
           debugPrint(
               'runStartupDiscovery: no devices found before budget expired');
         return;
+      }
+
+      // Don't stop scanning immediately on the first match.
+      // On busy radios it can take a couple seconds to observe all devices,
+      // and stopping early makes it look like only 1/N devices exist.
+      if (isScanning) {
+        final extra = const Duration(seconds: 2);
+        final remaining = deadline.difference(DateTime.now());
+        final wait = remaining > extra ? extra : remaining;
+        if (wait.inMilliseconds > 0) {
+          await Future.delayed(wait);
+        }
       }
 
       // Stop scanning before attempting proxy connection.
@@ -646,6 +661,16 @@ class DeviceManager extends ChangeNotifier {
     if (kDebugMode)
       debugPrint('startBLEScanning: starting (clearExisting=$clearExisting)');
     _scanSubscription = FlutterBluePlus.scanResults.listen((results) {
+      // Helpful scan diagnostics when only a few results appear.
+      if (kDebugMode && results.isNotEmpty && results.length <= 4) {
+        final macs = results
+            .map((r) => r.device.remoteId
+                .toString()
+                .toLowerCase()
+                .replaceAll('-', ':'))
+            .join(',');
+        debugPrint('startBLEScanning: raw scan results (${results.length}) macs=$macs');
+      }
       if (kDebugMode && results.isNotEmpty) {
         final now = DateTime.now();
         if (_lastScanResultsLog == null ||
@@ -657,6 +682,27 @@ class DeviceManager extends ChangeNotifier {
       var changed = false;
       for (final r in results) {
         if (filterMeshOnly && !_isMeshAdvertisement(r)) {
+          // If we're seeing very few results, log what we're skipping to
+          // differentiate radio issues from filter issues.
+          if (kDebugMode && results.length <= 4) {
+            final mac = r.device.remoteId
+                .toString()
+                .toLowerCase()
+                .replaceAll('-', ':');
+            String name = '';
+            try {
+              final adv = r.advertisementData.advName;
+              name = adv.isNotEmpty ? adv : r.device.platformName;
+            } catch (_) {
+              name = r.device.platformName;
+            }
+            final uuids = r.advertisementData.serviceUuids
+                .map((u) => u.toString())
+                .join(',');
+            final hasMfg = r.advertisementData.manufacturerData.isNotEmpty;
+            debugPrint(
+                'startBLEScanning: skipping (non-mesh) mac=$mac name="$name" uuids=[$uuids] mfg=$hasMfg');
+          }
           continue;
         }
         final mac =
@@ -886,6 +932,9 @@ class DeviceManager extends ChangeNotifier {
 
   // Trigger group action (mock sending mesh message)
   Future<int> triggerGroup(int groupId) async {
+    // If the user triggers a group, treat it as the active UI group so the next
+    // post-scan refresh targets the right devices.
+    setActiveUiGroupId(groupId);
     if (kDebugMode)
       debugPrint(
           'DeviceManager.triggerGroup: using meshClient=${meshClient.runtimeType} for group $groupId');
@@ -943,19 +992,32 @@ class DeviceManager extends ChangeNotifier {
           debugPrint(
               'DeviceManager.triggerGroup: native mesh PDU sent, listening for status callbacks');
         final targetMacs = groupMemberMacs.toSet();
-        final window = await _awaitOnOffStatusWindow(
+
+        // Keep a background monitor window for ON->OFF completion without blocking the UI.
+        unawaited(_awaitOnOffStatusWindow(
           targetMacs: targetMacs,
-          timeout: const Duration(seconds: 30),
+          timeout: _kTriggerStatusMonitorTimeout,
           completion: _OnOffWindowCompletion.onThenOff,
-        );
-        if (window.responded.isNotEmpty) {
+          exclusive: false,
+        ).then((res) {
           if (kDebugMode) {
             debugPrint(
-                'DeviceManager.triggerGroup: status responses=${window.responded.length}/${targetMacs.length}, completedAll=${window.completedAllTargets}');
+                'DeviceManager.triggerGroup: monitor done responded=${res.responded.length}/${targetMacs.length}, completedAll=${res.completedAllTargets}');
           }
-          return window.responded.length;
+        }));
+
+        // For UX: wait briefly for any first status responses, then return.
+        final quick = await _awaitOnOffStatusWindow(
+          targetMacs: targetMacs,
+          timeout: _kTriggerQuickAckTimeout,
+          completion: _OnOffWindowCompletion.anyStatus,
+          exclusive: true,
+        );
+        if (quick.responded.isNotEmpty) {
+          return quick.responded.length;
         }
-        // If we get here, no status responses yet — continue to fallback probing below
+        // No quick status responses yet; still consider the trigger sent.
+        return targetMacs.length;
       }
 
       // For fallback (GATT), check state changes
@@ -1210,12 +1272,21 @@ class DeviceManager extends ChangeNotifier {
           }
 
           final targetMacs = macAddresses.toSet();
-          final window = await _awaitOnOffStatusWindow(
+
+          unawaited(_awaitOnOffStatusWindow(
             targetMacs: targetMacs,
-            timeout: const Duration(seconds: 30),
+            timeout: _kTriggerStatusMonitorTimeout,
             completion: _OnOffWindowCompletion.onThenOff,
+            exclusive: false,
+          ));
+
+          final quick = await _awaitOnOffStatusWindow(
+            targetMacs: targetMacs,
+            timeout: _kTriggerQuickAckTimeout,
+            completion: _OnOffWindowCompletion.anyStatus,
+            exclusive: true,
           );
-          return window.responded.length;
+          return quick.responded.isNotEmpty ? quick.responded.length : targetMacs.length;
         }
       }
 
@@ -1309,14 +1380,41 @@ class DeviceManager extends ChangeNotifier {
             _devices.where((d) => d.groupId == groupId).toList();
         if (groupDevices.isEmpty) return;
 
-        // Ensure proxy connection and configure proxy filter.
-        await connectGroupProxy(groupId);
+        // Pick a proxy candidate MAC (prefer confirmed members).
+        final confirmed = _confirmedGroupMembers[groupId];
+        String proxyMac = groupDevices.first.macAddress;
+        if (confirmed != null && confirmed.isNotEmpty) {
+          final found = groupDevices.firstWhere(
+              (d) => confirmed.contains(d.macAddress),
+              orElse: () => groupDevices.first);
+          proxyMac = found.macAddress;
+        }
+
+        // Ensure proxy connection (and proxy filter) before sending gets.
+        final allUnicasts = _devices
+            .where((d) => d.unicastAddress > 0)
+            .map((d) => d.unicastAddress)
+            .toList();
+        final proxyOk = await pm.ensureProxyConnection(proxyMac,
+            deviceUnicasts: allUnicasts);
+        if (!proxyOk) return;
+        // Give the BLE stack a brief moment to settle.
+        await Future.delayed(const Duration(milliseconds: 250));
 
         final targetMacs = groupDevices.map((d) => d.macAddress).toSet();
         // Send GenericOnOffGet per device (unicast).
         for (final d in groupDevices) {
           try {
-            await pm.sendUnicastGet(d.unicastAddress);
+            final ok = await pm.sendUnicastGet(d.unicastAddress, proxyMac: proxyMac);
+            if (!ok) {
+              // One retry: proxy can drop between ensureProxyConnection and send.
+              final reOk = await pm.ensureProxyConnection(proxyMac,
+                  deviceUnicasts: allUnicasts);
+              if (reOk) {
+                await Future.delayed(const Duration(milliseconds: 150));
+                await pm.sendUnicastGet(d.unicastAddress, proxyMac: proxyMac);
+              }
+            }
           } catch (_) {}
           await Future.delayed(const Duration(milliseconds: 60));
         }
@@ -1339,10 +1437,16 @@ class DeviceManager extends ChangeNotifier {
     required Set<String> targetMacs,
     required Duration timeout,
     required _OnOffWindowCompletion completion,
+    bool exclusive = true,
   }) async {
-    // Cancel any existing trigger listener to avoid overlapping windows.
-    await _activeTriggerStatusSubscription?.cancel();
-    _activeTriggerStatusTimer?.cancel();
+    StreamSubscription<_OnOffStatusEvent>? subscription;
+    Timer? timer;
+
+    // Optionally cancel any existing trigger listener to avoid overlapping windows.
+    if (exclusive) {
+      await _activeTriggerStatusSubscription?.cancel();
+      _activeTriggerStatusTimer?.cancel();
+    }
 
     final progress = <String, _OnOffProgress>{
       for (final mac in targetMacs) mac: _OnOffProgress(),
@@ -1366,7 +1470,7 @@ class DeviceManager extends ChangeNotifier {
           responded: responded, completedAllTargets: completedAll));
     }
 
-    _activeTriggerStatusSubscription = _onOffStatusStream.stream.listen((evt) {
+    subscription = _onOffStatusStream.stream.listen((evt) {
       // Map status to a device MAC via unicast.
       final idx =
           _devices.indexWhere((d) => d.unicastAddress == evt.unicastAddress);
@@ -1388,15 +1492,23 @@ class DeviceManager extends ChangeNotifier {
       }
     });
 
-    _activeTriggerStatusTimer = Timer(timeout, () {
+    timer = Timer(timeout, () {
       finish();
     });
 
+    if (exclusive) {
+      _activeTriggerStatusSubscription = subscription;
+      _activeTriggerStatusTimer = timer;
+    }
+
     final res = await completer.future;
-    await _activeTriggerStatusSubscription?.cancel();
-    _activeTriggerStatusSubscription = null;
-    _activeTriggerStatusTimer?.cancel();
-    _activeTriggerStatusTimer = null;
+    await subscription?.cancel();
+    timer?.cancel();
+
+    if (exclusive) {
+      _activeTriggerStatusSubscription = null;
+      _activeTriggerStatusTimer = null;
+    }
     return res;
   }
 
@@ -1430,7 +1542,12 @@ class DeviceManager extends ChangeNotifier {
       final macs = _devices.map((d) => d.macAddress).toList();
       if (macs.isEmpty) return;
 
-      final states = await meshClient.getLightStates(macs);
+      // On mobile with the native mesh plugin, avoid periodic GenericOnOffGet polling.
+      // It can race with status callbacks / post-scan refresh and overwrite UI state.
+      final bool skipLightPolling = (meshClient is PlatformMeshClient) &&
+          (meshClient as PlatformMeshClient).isPluginAvailable;
+      final Map<String, bool> states =
+          skipLightPolling ? <String, bool>{} : await meshClient.getLightStates(macs);
       final batteryLevels = await meshClient.getBatteryLevels(macs);
       for (var i = 0; i < _devices.length; i++) {
         final d = _devices[i];
@@ -1609,6 +1726,13 @@ class DeviceManager extends ChangeNotifier {
               'DeviceManager.connectGroupProxy: ensuring proxy connection to $candidateMac with ${allUnicasts.length} devices');
         connected = await pm.ensureProxyConnection(candidateMac,
             deviceUnicasts: allUnicasts);
+        // Defensive: explicitly configure the filter too (native ensureProxyConnection
+        // also does this, but we want to avoid missing status packets after reconnects).
+        if (connected && allUnicasts.isNotEmpty) {
+          try {
+            await pm.configureProxyFilter(allUnicasts);
+          } catch (_) {}
+        }
       }
     } catch (e) {
       if (kDebugMode)

@@ -151,9 +151,9 @@ class PlatformMeshClient implements MeshClient {
       if (res == null) return _fallback.getLightStates(macAddresses);
       final out = <String, bool>{};
       res.forEach((k, v) { out[k as String] = v == true; });
-      if (out.isEmpty || out.values.every((b) => b == false)) {
-        return _fallback.getLightStates(macAddresses);
-      }
+      // NOTE: An "all false" result is a valid mesh state (everything is OFF).
+      // Only fall back when the plugin returns no data.
+      if (out.isEmpty) return _fallback.getLightStates(macAddresses);
       return out;
     } on MissingPluginException catch (e) {
       if (kDebugMode) debugPrint('PlatformMeshClient.getLightStates: MissingPluginException! Setting _available=false -> $e');
@@ -261,6 +261,22 @@ class PlatformMeshClient implements MeshClient {
       return result == true;
     } catch (e) {
       if (kDebugMode) debugPrint('PlatformMeshClient.sendUnicastMessage error: $e');
+      return false;
+    }
+  }
+
+  /// Send a GenericOnOffGet to a specific unicast address.
+  /// The device should respond with a GenericOnOffStatus which is surfaced via the status event channel.
+  Future<bool> sendUnicastGet(int unicastAddress, {String? proxyMac}) async {
+    try {
+      final args = {
+        'unicastAddress': unicastAddress,
+        if (proxyMac != null) 'proxyMac': proxyMac,
+      };
+      final result = await _channel.invokeMethod<bool>('sendUnicastGet', args);
+      return result == true;
+    } catch (e) {
+      if (kDebugMode) debugPrint('PlatformMeshClient.sendUnicastGet error: $e');
       return false;
     }
   }

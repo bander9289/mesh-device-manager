@@ -86,6 +86,8 @@ class _DevicesScreenState extends State<DevicesScreen> {
                                                 onChanged: (int? v) {
                                                   if (v == null) { return; }
                                                   setState(() => _selectedGroupId = v);
+                                                  // Track the UI-selected group for post-scan mesh refresh.
+                                                  context.read<DeviceManager>().setActiveUiGroupId(v);
                                                 },
                     );
                   },
@@ -298,7 +300,7 @@ class _DevicesScreenState extends State<DevicesScreen> {
                             return;
                           }
                           final dm = context.read<DeviceManager>();
-                          if (dm.isScanning) dm.stopScanning();
+                          if (dm.isScanning) dm.stopScanning(schedulePostScanRefresh: false);
                           Navigator.of(context).push(MaterialPageRoute(builder: (ctx) => DeviceDetailsScreen(device: device)));
                         },
                       );

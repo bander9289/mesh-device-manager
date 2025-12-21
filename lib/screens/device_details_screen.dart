@@ -102,7 +102,7 @@ class _DeviceDetailsScreenState extends State<DeviceDetailsScreen> {
     final wasScanning = dm.isScanning;
     final device = await _findDevice();
     if (device != null) {
-      if (wasScanning) dm.stopScanning();
+      if (wasScanning) dm.stopScanning(schedulePostScanRefresh: false);
       setState(() { _status = 'Connecting...'; });
       try {
         await device.connect(license: License.free);

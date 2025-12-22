@@ -37,8 +37,7 @@ analyzer:
     - .dart_tool/**
     - .gradle/**
     - .pub/**
-    - sdks/**
     - native_hooks/**
-    - **/generated/**
-    - **/*.g.dart
-    - **/*.freezed.dart
+    - "**/generated/**"
+    - "**/*.g.dart"
+    - "**/*.freezed.dart"

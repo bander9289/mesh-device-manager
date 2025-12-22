@@ -5,6 +5,7 @@ import '../models/mesh_device.dart';
 import 'package:provider/provider.dart';
 import '../managers/device_manager.dart';
 import '../managers/real_mesh_client.dart';
+import '../utils/mac_address.dart';
 
 class DeviceDetailsScreen extends StatefulWidget {
   final MeshDevice device;
@@ -46,10 +47,10 @@ class _DeviceDetailsScreenState extends State<DeviceDetailsScreen> {
       List<BluetoothDevice> devicesList = [];
       if (con is Future<List<BluetoothDevice>>) { devicesList = await con; }
       else if (con is List<BluetoothDevice>) { devicesList = con; }
-      final mac = widget.device.macAddress.toLowerCase().replaceAll('-', ':');
+      final mac = normalizeMac(widget.device.macAddress);
       BluetoothDevice? found;
       for (final d in devicesList) {
-        final rid = d.remoteId.toString().toLowerCase().replaceAll('-', ':');
+        final rid = normalizeMac(d.remoteId.toString());
         if (rid == mac) {
           found = d;
           break;
@@ -63,14 +64,14 @@ class _DeviceDetailsScreenState extends State<DeviceDetailsScreen> {
 
   Future<BluetoothDevice?> _findDevice() async {
     if (_bleDevice != null) return _bleDevice;
-    final mac = widget.device.macAddress.toLowerCase().replaceAll('-', ':');
+    final mac = normalizeMac(widget.device.macAddress);
     final dm = _dm;
     try {
       // If the app is already scanning, avoid starting/stopping scan ourselves to reduce noise
       if (dm.isScanning) {
         final resList = await FlutterBluePlus.scanResults.first;
         for (final r in resList) {
-          final rid = r.device.remoteId.toString().toLowerCase().replaceAll('-', ':');
+          final rid = normalizeMac(r.device.remoteId.toString());
           if (rid == mac) {
             setState(() { _bleDevice = r.device; });
             return r.device;
@@ -83,7 +84,7 @@ class _DeviceDetailsScreenState extends State<DeviceDetailsScreen> {
       FlutterBluePlus.startScan(timeout: const Duration(seconds: 4));
       final resList = await FlutterBluePlus.scanResults.first;
       for (final r in resList) {
-        final rid = r.device.remoteId.toString().toLowerCase().replaceAll('-', ':');
+        final rid = normalizeMac(r.device.remoteId.toString());
         if (rid == mac) {
           FlutterBluePlus.stopScan();
           setState(() { _bleDevice = r.device; });

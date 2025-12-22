@@ -5,6 +5,7 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 
 import '../../models/mesh_device.dart';
 import '../../models/mesh_group.dart';
+import '../../utils/mac_address.dart';
 
 class BleScanningService {
   BleScanningService({
@@ -31,8 +32,7 @@ class BleScanningService {
   bool get isScanning => _scanSubscription != null;
 
   BluetoothDevice? getCachedDevice(String mac) {
-    final normalized = mac.toLowerCase().replaceAll(':', '-');
-    return _deviceCache[normalized];
+    return _deviceCache[macCacheKey(mac)];
   }
 
   void start({
@@ -56,10 +56,7 @@ class BleScanningService {
       // Helpful scan diagnostics when only a few results appear.
       if (kDebugMode && results.isNotEmpty && results.length <= 4) {
         final macs = results
-            .map((r) => r.device.remoteId
-                .toString()
-                .toLowerCase()
-                .replaceAll('-', ':'))
+            .map((r) => normalizeMac(r.device.remoteId.toString()))
             .join(',');
         debugPrint('BleScanningService: raw scan results (${results.length}) macs=$macs');
       }
@@ -79,10 +76,7 @@ class BleScanningService {
           // If we're seeing very few results, log what we're skipping to
           // differentiate radio issues from filter issues.
           if (kDebugMode && results.length <= 4) {
-            final mac = r.device.remoteId
-                .toString()
-                .toLowerCase()
-                .replaceAll('-', ':');
+            final mac = normalizeMac(r.device.remoteId.toString());
             String name = '';
             try {
               final adv = r.advertisementData.advName;
@@ -101,12 +95,10 @@ class BleScanningService {
           continue;
         }
 
-        final mac =
-            r.device.remoteId.toString().toLowerCase().replaceAll('-', ':');
+        final mac = normalizeMac(r.device.remoteId.toString());
 
         // Cache the BluetoothDevice object for later use
-        final cacheKey = mac.replaceAll(':', '-');
-        _deviceCache[cacheKey] = r.device;
+        _deviceCache[macCacheKey(mac)] = r.device;
 
         final identifier = (r.device.platformName.isNotEmpty)
             ? r.device.platformName
@@ -231,7 +223,7 @@ class BleScanningService {
   }
 
   bool _isMeshAdvertisement(ScanResult r) {
-    final mac = r.device.remoteId.toString().toLowerCase().replaceAll('-', ':');
+    final mac = normalizeMac(r.device.remoteId.toString());
 
     // 1) Mesh Proxy / Provisioning service UUIDs (provisioned/unprovisioned)
     final uuids = r.advertisementData.serviceUuids
@@ -279,9 +271,21 @@ class BleScanningService {
     }
 
     // 3) Manufacturer data heuristic - fallback: some mesh devices include private bytes
-    // Only accept this fallback if it matches a hardware whitelist entry explicitly.
+    // Some devices may not consistently advertise Mesh UUIDs or a stable name;
+    // manufacturer data is often more reliable.
     if (r.advertisementData.manufacturerData.isNotEmpty) {
       try {
+        // Prefer a strong signal: Nordic Semiconductor company identifier (0x0059).
+        // This is common for nRF52-based devices and helps avoid missing devices
+        // whose adverts omit the Mesh service UUIDs.
+        const nordicCompanyId = 0x0059;
+        if (r.advertisementData.manufacturerData.containsKey(nordicCompanyId)) {
+          if (_shouldLogAdvert(mac) && kDebugMode && verboseLogging) {
+            debugPrint('BleScanningService: manufacturer data has Nordic companyId (0x0059)');
+          }
+          return true;
+        }
+
         final entry = r.advertisementData.manufacturerData.entries.first;
         final hw = entry.value
             .map((b) => b.toRadixString(16).padLeft(2, '0'))
@@ -289,6 +293,7 @@ class BleScanningService {
         if (_shouldLogAdvert(mac) && kDebugMode && verboseLogging) {
           debugPrint('BleScanningService: manufacturer data present hw=$hw');
         }
+        // Only accept unknown manufacturer payloads if explicitly whitelisted.
         if (hardwareIdWhitelist.isNotEmpty && hardwareIdWhitelist.contains(hw)) {
           return true;
         }

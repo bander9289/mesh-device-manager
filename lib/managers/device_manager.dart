@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import '../models/mesh_device.dart';
 import '../models/mesh_group.dart';
+import '../utils/mac_address.dart';
 import 'mesh_client.dart';
 import 'real_mesh_client.dart';
 import 'gatt_mesh_client.dart';
@@ -89,8 +90,7 @@ class DeviceManager extends ChangeNotifier {
     platformClient.setBatteryUpdateCallback((mac, battery) {
       final device = _devices
           .where((d) =>
-              d.macAddress.toLowerCase().replaceAll('-', ':') ==
-              mac.toLowerCase().replaceAll('-', ':'))
+          normalizeMac(d.macAddress) == normalizeMac(mac))
           .firstOrNull;
       if (device != null) {
         device.batteryPercent = battery;
@@ -106,8 +106,7 @@ class DeviceManager extends ChangeNotifier {
     platformClient.setSubscriptionReadyCallback((mac) {
       final device = _devices
           .where((d) =>
-              d.macAddress.toLowerCase().replaceAll('-', ':') ==
-              mac.toLowerCase().replaceAll('-', ':'))
+        normalizeMac(d.macAddress) == normalizeMac(mac))
           .firstOrNull;
       if (device != null) {
         device.connectionStatus =
@@ -1298,7 +1297,7 @@ class DeviceManager extends ChangeNotifier {
       debugPrint(
           'subscribeGroupDevices: subscribing ${devicesToSub.length} devices in group $groupId');
     for (final d in devicesToSub) {
-      final mac = d.macAddress.toLowerCase().replaceAll('-', ':');
+      final mac = normalizeMac(d.macAddress);
       final last = _lastSubscriptionAttempt[mac];
       final now = DateTime.now();
       if (last != null && now.difference(last) < _subscribeCooldown) {
@@ -1327,7 +1326,7 @@ class DeviceManager extends ChangeNotifier {
           devicesList = con;
         }
         for (final cd in devicesList) {
-          final rid = cd.remoteId.toString().toLowerCase().replaceAll('-', ':');
+          final rid = normalizeMac(cd.remoteId.toString());
           if (rid == mac) {
             isConnected = true;
             break;
@@ -1411,7 +1410,7 @@ class DeviceManager extends ChangeNotifier {
 
   /// Unsubscribe and close any plugin-managed subscriptions for the given MAC.
   Future<void> unsubscribeDeviceByMac(String mac) async {
-    final normalized = mac.toLowerCase().replaceAll('-', ':');
+    final normalized = normalizeMac(mac);
     if (_pluginSubscribedMacs.contains(normalized)) {
       try {
         if (meshClient is PlatformMeshClient) {
@@ -1430,7 +1429,8 @@ class DeviceManager extends ChangeNotifier {
 
   /// Update a device's dynamic state (battery/light) by MAC and notify listeners.
   void updateDeviceState(String mac, {int? batteryPercent, bool? lightOn}) {
-    final idx = _devices.indexWhere((d) => d.macAddress == mac);
+    final normalized = normalizeMac(mac);
+    final idx = _devices.indexWhere((d) => normalizeMac(d.macAddress) == normalized);
     if (idx < 0) return;
     final d = _devices[idx];
     _devices[idx] = MeshDevice(

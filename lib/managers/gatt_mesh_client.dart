@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'mesh_client.dart';
 import '../models/mesh_device.dart';
+import '../utils/mac_address.dart';
 
 /// Basic GATT-based MeshClient fallback. It writes to known candidate characteristics
 /// to toggle a light on devices and reads them to determine state. This is not a
@@ -31,12 +32,9 @@ class GattMeshClient implements MeshClient {
 
   static DateTime? _lastLocalScan;
 
-  String _cleanMac(String mac) => mac.toLowerCase().replaceAll('-', '').replaceAll(':', '');
-  String _colonMac(String mac) => mac.toLowerCase().replaceAll('-', ':');
-
   Future<BluetoothDevice?> _getDeviceByMac(String mac, {bool allowScan = true}) async {
-    final normalizedMac = _colonMac(mac);
-    final normalizedMacNoSep = _cleanMac(mac);
+    final normalizedMac = normalizeMac(mac);
+    final normalizedMacNoSep = macNoSeparators(mac);
     
     // 1. First check connected devices
     final dynamic con = FlutterBluePlus.connectedDevices;
@@ -49,8 +47,8 @@ class GattMeshClient implements MeshClient {
     try {
       if (kDebugMode) debugPrint('GattMeshClient._getDeviceByMac: connectedDevices count=${devicesList.length}');
       final connected = devicesList.firstWhere((d) {
-        final rid = d.remoteId.toString().toLowerCase().replaceAll('-', ':');
-        final ridNoSep = rid.replaceAll(':', '');
+        final rid = normalizeMac(d.remoteId.toString());
+        final ridNoSep = macNoSeparators(rid);
         return rid == normalizedMac || ridNoSep == normalizedMacNoSep;
       });
       if (kDebugMode) debugPrint('GattMeshClient._getDeviceByMac: found connected device $mac');
@@ -73,8 +71,8 @@ class GattMeshClient implements MeshClient {
             debugPrint('GattMeshClient._getDeviceByMac: scanResults attempt $i size=${resList.length}');
           }
           for (final r in resList) {
-            final rid = r.device.remoteId.toString().toLowerCase().replaceAll('-', ':');
-            final ridNoSep = rid.replaceAll(':', '');
+            final rid = normalizeMac(r.device.remoteId.toString());
+            final ridNoSep = macNoSeparators(rid);
             if (rid == normalizedMac || ridNoSep == normalizedMacNoSep) {
               if (kDebugMode) debugPrint('GattMeshClient._getDeviceByMac: found in scan results $mac');
               return r.device;
@@ -111,8 +109,8 @@ class GattMeshClient implements MeshClient {
           onTimeout: () => <ScanResult>[]
         );
         for (final r in resList) {
-          final rid = r.device.remoteId.toString().toLowerCase().replaceAll('-', ':');
-          final ridNoSep = rid.replaceAll(':', '');
+          final rid = normalizeMac(r.device.remoteId.toString());
+          final ridNoSep = macNoSeparators(rid);
           if (rid == normalizedMac || ridNoSep == normalizedMacNoSep) {
             try { await FlutterBluePlus.stopScan(); } catch (_) {}
             if (kDebugMode) debugPrint('GattMeshClient._getDeviceByMac: found in dedicated scan $mac');
@@ -251,7 +249,7 @@ class GattMeshClient implements MeshClient {
     final out = <String, bool>{};
     final devices = deviceProvider();
     for (final mac in macAddresses) {
-      final matches = devices.where((d) => d.macAddress.toLowerCase().replaceAll('-', ':') == mac.toLowerCase().replaceAll('-', ':')).toList();
+      final matches = devices.where((d) => macEquals(d.macAddress, mac)).toList();
       MeshDevice? match;
       if (matches.isNotEmpty) match = matches.first;
       out[mac] = match?.lightOn ?? false;
@@ -273,7 +271,7 @@ class GattMeshClient implements MeshClient {
     final out = <String, int>{};
     final devices = deviceProvider();
     for (final mac in macAddresses) {
-      final matches = devices.where((d) => d.macAddress.toLowerCase().replaceAll('-', ':') == mac.toLowerCase().replaceAll('-', ':')).toList();
+      final matches = devices.where((d) => macEquals(d.macAddress, mac)).toList();
       MeshDevice? match;
       if (matches.isNotEmpty) match = matches.first;
       out[mac] = match?.batteryPercent ?? 0;
@@ -289,8 +287,8 @@ class GattMeshClient implements MeshClient {
     final devices = deviceProvider();
     List<MeshDevice> toToggle;
     if (macAddresses != null && macAddresses.isNotEmpty) {
-      final normalized = macAddresses.map((m) => m.toLowerCase().replaceAll('-', ':')).toList();
-      toToggle = devices.where((d) => normalized.contains(d.macAddress.toLowerCase().replaceAll('-', ':'))).toList();
+      final normalized = macAddresses.map(normalizeMac).toSet();
+      toToggle = devices.where((d) => normalized.contains(normalizeMac(d.macAddress))).toList();
     } else {
       toToggle = devices.where((d) => d.groupId == groupId).toList();
     }

@@ -1,4 +1,5 @@
 import '../models/mesh_device.dart';
+import '../utils/mac_address.dart';
 
 /// Mesh client abstraction used to send and poll mesh messages.
 /// Provide a real implementation (nRF Mesh SDK) for production.
@@ -50,7 +51,7 @@ class MockMeshClient implements MeshClient {
     final out = <String, int>{};
     final devices = deviceProvider();
     for (final mac in macAddresses) {
-      final match = devices.where((d) => d.macAddress.toLowerCase().replaceAll('-', ':') == mac.toLowerCase().replaceAll('-', ':')).toList();
+      final match = devices.where((d) => macEquals(d.macAddress, mac)).toList();
       out[mac] = match.isNotEmpty ? (match.first.batteryPercent) : 0;
     }
     return out;

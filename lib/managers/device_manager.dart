@@ -89,32 +89,32 @@ class DeviceManager extends ChangeNotifier {
     // Set up callbacks for battery updates and subscription ready notifications
     platformClient.setBatteryUpdateCallback((mac, battery) {
       final device = _devices
-          .where((d) =>
-          normalizeMac(d.macAddress) == normalizeMac(mac))
+          .where((d) => normalizeMac(d.macAddress) == normalizeMac(mac))
           .firstOrNull;
       if (device != null) {
         device.batteryPercent = battery;
         device.connectionStatus =
             ConnectionStatus.ready; // Battery read means device is fully ready
         notifyListeners();
-        if (kDebugMode)
+        if (kDebugMode) {
           debugPrint(
               'DeviceManager: updated battery for $mac to $battery% (device ready)');
+        }
       }
     });
 
     platformClient.setSubscriptionReadyCallback((mac) {
       final device = _devices
-          .where((d) =>
-        normalizeMac(d.macAddress) == normalizeMac(mac))
+          .where((d) => normalizeMac(d.macAddress) == normalizeMac(mac))
           .firstOrNull;
       if (device != null) {
         device.connectionStatus =
             ConnectionStatus.connected; // Mark as connected
         notifyListeners();
-        if (kDebugMode)
+        if (kDebugMode) {
           debugPrint(
               'DeviceManager: subscription ready for $mac (waiting for battery)');
+        }
       }
       // Refresh device states when subscription is ready
       refreshDeviceLightStates();
@@ -194,9 +194,10 @@ class DeviceManager extends ChangeNotifier {
       // Wait briefly for the first device.
       final firstFound = await _waitForFirstMeshDevice(deadline: deadline);
       if (!firstFound) {
-        if (kDebugMode)
+        if (kDebugMode) {
           debugPrint(
               'runStartupDiscovery: no devices found before budget expired');
+        }
         return;
       }
 
@@ -222,16 +223,18 @@ class DeviceManager extends ChangeNotifier {
       // Connect to proxy using the first good candidate.
       final proxyCandidate = _pickProxyCandidateMac();
       if (proxyCandidate == null) {
-        if (wasScanning)
+        if (wasScanning) {
           startBLEScanning(
               timeout: const Duration(seconds: 5), clearExisting: false);
+        }
         return;
       }
       final proxyOk = await _ensureProxyConnected(proxyCandidate);
       if (!proxyOk) {
-        if (wasScanning)
+        if (wasScanning) {
           startBLEScanning(
               timeout: const Duration(seconds: 5), clearExisting: false);
+        }
         return;
       }
 
@@ -546,13 +549,14 @@ class DeviceManager extends ChangeNotifier {
     ]);
     // Assign Default group only to the first mock device; leave others unassigned
     final defaultGroupId =
-      _groups.isNotEmpty ? _groups.first.id : _groupStore.nextGroupAddress;
+        _groups.isNotEmpty ? _groups.first.id : _groupStore.nextGroupAddress;
     if (_devices.isNotEmpty) {
       _devices[0].groupId = defaultGroupId; // first device assigned to Default
       // others intentionally left with groupId == null to be visible under 'Unknown'
     }
-    if (kDebugMode)
+    if (kDebugMode) {
       debugPrint('startMockScanning: added ${_devices.length} mock devices');
+    }
     notifyListeners();
     refreshDeviceLightStates();
     _stateRefreshTimer?.cancel();
@@ -628,8 +632,9 @@ class DeviceManager extends ChangeNotifier {
         _refreshFailureCount = 0; // Reset on success
       } catch (e) {
         _refreshFailureCount++;
-        if (kDebugMode)
+        if (kDebugMode) {
           debugPrint('State refresh failed (${_refreshFailureCount}x): $e');
+        }
       }
     });
     notifyListeners(); // Update UI to show scanning indicator after setup complete
@@ -671,16 +676,18 @@ class DeviceManager extends ChangeNotifier {
     // If the user triggers a group, treat it as the active UI group so the next
     // post-scan refresh targets the right devices.
     setActiveUiGroupId(groupId);
-    if (kDebugMode)
+    if (kDebugMode) {
       debugPrint(
           'DeviceManager.triggerGroup: using meshClient=${meshClient.runtimeType} for group $groupId');
+    }
 
     // CRITICAL: Stop scanning to free up BLE resources for connection attempts
     final wasScanning = isScanning;
     if (wasScanning) {
-      if (kDebugMode)
+      if (kDebugMode) {
         debugPrint(
             'DeviceManager.triggerGroup: stopping scan to free BLE resources');
+      }
       stopScanning(schedulePostScanRefresh: false);
       await Future.delayed(
           const Duration(milliseconds: 500)); // Allow BLE stack to cleanup
@@ -690,9 +697,10 @@ class DeviceManager extends ChangeNotifier {
       if (meshClient is PlatformMeshClient) {
         final pm = meshClient as PlatformMeshClient;
         if (!pm.isPluginAvailable && (Platform.isAndroid || Platform.isIOS)) {
-          if (kDebugMode)
+          if (kDebugMode) {
             debugPrint(
                 'DeviceManager.triggerGroup: no native mesh plugin available on mobile; GATT fallback will be used');
+          }
         }
       }
       // Gather all device macs
@@ -703,9 +711,10 @@ class DeviceManager extends ChangeNotifier {
           .where((d) => d.groupId == groupId)
           .map((d) => d.macAddress)
           .toList();
-      if (kDebugMode)
+      if (kDebugMode) {
         debugPrint(
             'DeviceManager.triggerGroup: group $groupId members=${groupMemberMacs.length} macs=${groupMemberMacs.join(',')}');
+      }
       bool pluginHandled = false;
       if (meshClient is PlatformMeshClient) {
         try {
@@ -724,9 +733,10 @@ class DeviceManager extends ChangeNotifier {
       // Instead listen for GenericOnOffStatus for up to 30s (or until all targets
       // have reported ON then OFF).
       if (pluginHandled && meshClient is PlatformMeshClient) {
-        if (kDebugMode)
+        if (kDebugMode) {
           debugPrint(
               'DeviceManager.triggerGroup: native mesh PDU sent, listening for status callbacks');
+        }
         final targetMacs = groupMemberMacs.toSet();
 
         // Keep a background monitor window for ON->OFF completion without blocking the UI.
@@ -763,12 +773,14 @@ class DeviceManager extends ChangeNotifier {
       final after = await meshClient.getLightStates(macs);
 
       final changedMacs = <String>{};
-      if (kDebugMode)
+      if (kDebugMode) {
         debugPrint(
             'DeviceManager.triggerGroup: before states=${before.entries.map((e) => '${e.key}:${e.value}').join(',')}');
-      if (kDebugMode)
+      }
+      if (kDebugMode) {
         debugPrint(
             'DeviceManager.triggerGroup: after states=${after.entries.map((e) => '${e.key}:${e.value}').join(',')}');
+      }
       for (final mac in macs) {
         final b = before[mac] ?? false;
         final a = after[mac] ?? false;
@@ -783,16 +795,18 @@ class DeviceManager extends ChangeNotifier {
         if (meshClient is PlatformMeshClient) {
           final pm = meshClient as PlatformMeshClient;
           if (!pm.isPluginAvailable && (Platform.isAndroid || Platform.isIOS)) {
-            if (kDebugMode)
+            if (kDebugMode) {
               debugPrint(
                   'triggerGroup: platform native plugin unavailable and fallback produced no changes');
+            }
             return -1; // signal that group trigger did not succeed due to missing native implementation
           }
           // Plugin was available and handled PDU, but no devices changed state — attempt plugin-side GATT writes
           if (pluginHandled && (Platform.isAndroid || Platform.isIOS)) {
-            if (kDebugMode)
+            if (kDebugMode) {
               debugPrint(
                   'triggerGroup: plugin handled PDU but no state change observed — trying plugin GATT writes then GATT fallback');
+            }
             final pluginWroteMacs = <String>{};
             final candidateUuids = [
               '0000ff01-0000-1000-8000-00805f9b34fb',
@@ -870,14 +884,16 @@ class DeviceManager extends ChangeNotifier {
                     withResponse: true);
                 if (ok) {
                   pluginWroteMacs.add(mac);
-                  if (kDebugMode)
+                  if (kDebugMode) {
                     debugPrint(
                         'triggerGroup: plugin wrote characteristic $targetUuid for $mac');
+                  }
                 }
               } catch (e) {
-                if (kDebugMode)
+                if (kDebugMode) {
                   debugPrint(
                       'triggerGroup: plugin char write failed for $mac -> $e');
+                }
               }
             }
             // If the plugin couldn't perform writes for some members, fallback to direct GATT fallback for those MACs
@@ -902,9 +918,10 @@ class DeviceManager extends ChangeNotifier {
               changedMacs.addAll(changedMacs2);
             }
             if (changedMacs.isEmpty) {
-              if (kDebugMode)
+              if (kDebugMode) {
                 debugPrint(
                     'triggerGroup: GATT fallback also did not change device states');
+              }
             }
           }
         }
@@ -957,17 +974,19 @@ class DeviceManager extends ChangeNotifier {
     } finally {
       // Restart scanning if it was running before
       if (wasScanning) {
-        if (kDebugMode)
+        if (kDebugMode) {
           debugPrint('DeviceManager.triggerGroup: restarting scan');
+        }
         startBLEScanning(timeout: const Duration(seconds: 20));
       }
     }
   }
 
   Future<int> triggerDevices(List<String> macAddresses) async {
-    if (kDebugMode)
+    if (kDebugMode) {
       debugPrint(
           'DeviceManager.triggerDevices: triggering ${macAddresses.length} devices');
+    }
     // Similar to triggerGroup: prefer native mesh + status listening when available.
     // Fallback continues to use GATT polling.
     final wasScanning = isScanning;
@@ -1001,9 +1020,10 @@ class DeviceManager extends ChangeNotifier {
                     version: '',
                     lightOn: false));
             final ok = await pm.sendUnicastMessage(d.unicastAddress, true);
-            if (kDebugMode)
+            if (kDebugMode) {
               debugPrint(
                   'DeviceManager.triggerDevices: unicast set to 0x${d.unicastAddress.toRadixString(16)} ok=$ok');
+            }
             await Future.delayed(const Duration(milliseconds: 50));
           }
 
@@ -1022,7 +1042,9 @@ class DeviceManager extends ChangeNotifier {
             completion: _OnOffWindowCompletion.anyStatus,
             exclusive: true,
           );
-          return quick.responded.isNotEmpty ? quick.responded.length : targetMacs.length;
+          return quick.responded.isNotEmpty
+              ? quick.responded.length
+              : targetMacs.length;
         }
       }
 
@@ -1039,14 +1061,16 @@ class DeviceManager extends ChangeNotifier {
         if (b != a && macAddresses.contains(mac)) changedMacs.add(mac);
       }
       if (changedMacs.isEmpty) {
-        if (kDebugMode)
+        if (kDebugMode) {
           debugPrint('Triggered devices but no devices changed state');
+        }
         if (meshClient is PlatformMeshClient) {
           final pm = meshClient as PlatformMeshClient;
           if (!pm.isPluginAvailable && (Platform.isAndroid || Platform.isIOS)) {
-            if (kDebugMode)
+            if (kDebugMode) {
               debugPrint(
                   'triggerDevices: platform native plugin unavailable and fallback produced no changes');
+            }
             return -1;
           }
         }
@@ -1083,9 +1107,10 @@ class DeviceManager extends ChangeNotifier {
       }
       _confirmedGroupMembers[0] = changedMacs; // treat 0 as transient group
       notifyListeners();
-      if (kDebugMode)
+      if (kDebugMode) {
         debugPrint(
             'Triggered devices: confirmed ${changedMacs.length} devices');
+      }
       // Auto-subscribe confirmed transient devices (0 group)
       try {
         await subscribeGroupDevices(0, scanIfDisconnected: false);
@@ -1102,7 +1127,7 @@ class DeviceManager extends ChangeNotifier {
     if (_usingMock) return;
     if (_postScanMeshRefreshInProgress) return;
     // Only meaningful on mobile with native mesh plugin.
-    if (!(meshClient is PlatformMeshClient)) return;
+    if (meshClient is! PlatformMeshClient) return;
     final pm = meshClient as PlatformMeshClient;
     if (!pm.isPluginAvailable) return;
 
@@ -1141,7 +1166,8 @@ class DeviceManager extends ChangeNotifier {
         // Send GenericOnOffGet per device (unicast).
         for (final d in groupDevices) {
           try {
-            final ok = await pm.sendUnicastGet(d.unicastAddress, proxyMac: proxyMac);
+            final ok =
+                await pm.sendUnicastGet(d.unicastAddress, proxyMac: proxyMac);
             if (!ok) {
               // One retry: proxy can drop between ensureProxyConnection and send.
               final reOk = await pm.ensureProxyConnection(proxyMac,
@@ -1251,8 +1277,9 @@ class DeviceManager extends ChangeNotifier {
   Future<void> refreshDeviceLightStates() async {
     // Skip if already refreshing to prevent overlapping operations
     if (_isRefreshing) {
-      if (kDebugMode)
+      if (kDebugMode) {
         debugPrint('refreshDeviceLightStates: skipping (already in progress)');
+      }
       return;
     }
 
@@ -1265,8 +1292,9 @@ class DeviceManager extends ChangeNotifier {
       // It can race with status callbacks / post-scan refresh and overwrite UI state.
       final bool skipLightPolling = (meshClient is PlatformMeshClient) &&
           (meshClient as PlatformMeshClient).isPluginAvailable;
-      final Map<String, bool> states =
-          skipLightPolling ? <String, bool>{} : await meshClient.getLightStates(macs);
+      final Map<String, bool> states = skipLightPolling
+          ? <String, bool>{}
+          : await meshClient.getLightStates(macs);
       final batteryLevels = await meshClient.getBatteryLevels(macs);
       for (var i = 0; i < _devices.length; i++) {
         final d = _devices[i];
@@ -1293,22 +1321,25 @@ class DeviceManager extends ChangeNotifier {
       {bool scanIfDisconnected = false}) async {
     final devicesToSub = _devices.where((d) => d.groupId == groupId).toList();
     if (devicesToSub.isEmpty) return;
-    if (kDebugMode)
+    if (kDebugMode) {
       debugPrint(
           'subscribeGroupDevices: subscribing ${devicesToSub.length} devices in group $groupId');
+    }
     for (final d in devicesToSub) {
       final mac = normalizeMac(d.macAddress);
       final last = _lastSubscriptionAttempt[mac];
       final now = DateTime.now();
       if (last != null && now.difference(last) < _subscribeCooldown) {
-        if (kDebugMode)
+        if (kDebugMode) {
           debugPrint('subscribeGroupDevices: skipping $mac (cooldown)');
+        }
         continue;
       }
       if (_subscriptionInProgress.contains(mac)) {
-        if (kDebugMode)
+        if (kDebugMode) {
           debugPrint(
               'subscribeGroupDevices: skipping $mac (already in progress)');
+        }
         continue;
       }
       // Set device status to connecting
@@ -1343,9 +1374,10 @@ class DeviceManager extends ChangeNotifier {
       } catch (_) {}
 
       if (!isConnected && !scanIfDisconnected && !pluginAvailable) {
-        if (kDebugMode)
+        if (kDebugMode) {
           debugPrint(
               'subscribeGroupDevices: skipping $mac (not connected; no plugin and scan prevented)');
+        }
         continue;
       }
       _subscriptionInProgress.add(mac);
@@ -1353,9 +1385,10 @@ class DeviceManager extends ChangeNotifier {
       try {
         // prefer native plugin subscription when available, which connects by MAC and doesn't require scanning
         if (pluginAvailable) {
-          if (kDebugMode)
+          if (kDebugMode) {
             debugPrint(
                 'subscribeGroupDevices: plugin available — attempting native subscribe for $mac');
+          }
           final ok = await meshClient.subscribeToDeviceCharacteristics(
               d.macAddress, _autoSubscribeUuids,
               onNotify: (macAddr, uuid, val) {
@@ -1375,9 +1408,10 @@ class DeviceManager extends ChangeNotifier {
             _pluginSubscribedMacs.add(mac);
           }
         } else {
-          if (kDebugMode)
+          if (kDebugMode) {
             debugPrint(
                 'subscribeGroupDevices: plugin not available — attempting GATT subscribe for $mac (scanIfDisconnected=$scanIfDisconnected)');
+          }
           final ok = await meshClient.subscribeToDeviceCharacteristics(
               d.macAddress, _autoSubscribeUuids,
               onNotify: (macAddr, uuid, val) {
@@ -1398,8 +1432,9 @@ class DeviceManager extends ChangeNotifier {
           }
         }
       } catch (e) {
-        if (kDebugMode)
+        if (kDebugMode) {
           debugPrint('subscribeGroupDevices: subscribe failed for $mac -> $e');
+        }
       }
       _subscriptionInProgress.remove(mac);
       // stagger to avoid starting many connections simultaneously
@@ -1430,7 +1465,8 @@ class DeviceManager extends ChangeNotifier {
   /// Update a device's dynamic state (battery/light) by MAC and notify listeners.
   void updateDeviceState(String mac, {int? batteryPercent, bool? lightOn}) {
     final normalized = normalizeMac(mac);
-    final idx = _devices.indexWhere((d) => normalizeMac(d.macAddress) == normalized);
+    final idx =
+        _devices.indexWhere((d) => normalizeMac(d.macAddress) == normalized);
     if (idx < 0) return;
     final d = _devices[idx];
     _devices[idx] = MeshDevice(
@@ -1478,9 +1514,7 @@ class DeviceManager extends ChangeNotifier {
         final confirmed =
             _confirmedGroupMembers.putIfAbsent(activeGroupId, () => <String>{});
         confirmed.add(device.macAddress);
-        if (nextGroupId == null) {
-          nextGroupId = activeGroupId;
-        }
+        nextGroupId ??= activeGroupId;
       }
 
       _devices[deviceIndex] = MeshDevice(

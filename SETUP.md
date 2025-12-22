@@ -128,7 +128,8 @@ Once Flutter and Android are configured:
 
 2. **Check for Issues:**
    ```bash
-   flutter analyze
+   # Repo policy: treat lints (including "info") as fatal.
+   flutter analyze --fatal-infos --fatal-warnings
    ```
 
 3. **Run on Device/Emulator:**

@@ -414,6 +414,93 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         }
     }
 
+    /**
+     * Best-effort helper to ensure the provisioner exists as a node in the imported mesh JSON.
+     *
+     * This is intentionally defensive: if JSON import fails due to schema differences, we log
+     * and return false without crashing or corrupting runtime state.
+     */
+    private fun createProvisionerNode(network: MeshNetwork, unicastAddress: Int): Boolean {
+        return try {
+            val json = meshManagerApi.exportMeshNetwork()
+            if (json.isNullOrEmpty()) {
+                android.util.Log.e("MeshPlugin", "Cannot create provisioner node: exportMeshNetwork() returned empty")
+                return false
+            }
+
+            val root = JSONObject(json)
+            val nodesArray = root.optJSONArray("nodes") ?: JSONArray()
+
+            for (i in 0 until nodesArray.length()) {
+                val nodeObj = nodesArray.optJSONObject(i) ?: continue
+                if (nodeObj.optInt("unicastAddress", -1) == unicastAddress) {
+                    return true
+                }
+            }
+
+            // Minimal node definition matching what we read elsewhere in this plugin.
+            // If the Nordic SDK requires more fields, import will fail and we'll return false.
+            val provisionerNodeJson = JSONObject().apply {
+                put("UUID", UUID.randomUUID().toString().replace("-", ""))
+                put("name", "Provisioner")
+                put("unicastAddress", unicastAddress)
+                put("deviceKey", "00000000000000000000000000000000")
+                put(
+                    "elements",
+                    JSONArray().put(
+                        JSONObject().apply {
+                            put("index", 0)
+                            put("location", "0000")
+                            put(
+                                "models",
+                                JSONArray().apply {
+                                    // Configuration Server
+                                    put(
+                                        JSONObject().apply {
+                                            put("modelId", "0000")
+                                            put("subscribe", JSONArray())
+                                            put("bind", JSONArray())
+                                        }
+                                    )
+                                    // Health Server
+                                    put(
+                                        JSONObject().apply {
+                                            put("modelId", "0002")
+                                            put("subscribe", JSONArray())
+                                            put("bind", JSONArray())
+                                        }
+                                    )
+                                    // Generic OnOff Client (to receive statuses)
+                                    put(
+                                        JSONObject().apply {
+                                            put("modelId", "1001")
+                                            put("subscribe", JSONArray())
+                                            put("bind", JSONArray().put(0))
+                                        }
+                                    )
+                                }
+                            )
+                        }
+                    )
+                )
+            }
+
+            nodesArray.put(provisionerNodeJson)
+            root.put("nodes", nodesArray)
+
+            val modifiedJson = root.toString()
+            android.util.Log.i("MeshPlugin", "Attempting mesh JSON import with added provisioner node")
+            meshManagerApi.importMeshNetworkJson(modifiedJson)
+            meshNetwork = meshManagerApi.meshNetwork
+
+            val verifyNode = meshNetwork?.nodes?.firstOrNull { it.unicastAddress == unicastAddress }
+            verifyNode != null
+        } catch (e: Exception) {
+            android.util.Log.e("MeshPlugin", "createProvisionerNode failed: ${e.message}", e)
+            false
+        }
+    }
+
     private fun connectToDevice(call: MethodCall, result: MethodChannel.Result) {
         scope.launch {
             try {
@@ -934,6 +1021,9 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         private var proxyDataOut: BluetoothGattCharacteristic? = null
         private var batteryLevelChar: BluetoothGattCharacteristic? = null
 
+        private var negotiatedMtu: Int = 23
+        private var lastBatteryLevel: Int? = null
+
         // BLE Mesh Proxy PDUs may be segmented across multiple notifications.
         // Reassemble segments (SAR=First/Continuation/Last) into a complete PDU.
         private var rxProxyPduType: Int? = null
@@ -942,6 +1032,31 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         // Callback to notify when connection is ready
         var onConnectionReady: (() -> Unit)? = null
         var onConnectionFailed: (() -> Unit)? = null
+
+        fun getGattMtu(): Int = negotiatedMtu
+
+        fun getBatteryLevel(): Int? = lastBatteryLevel
+
+        fun sendPdu(pdu: ByteArray) {
+            val target = proxyDataIn
+            if (target == null) {
+                android.util.Log.e("MeshPlugin", "sendPdu: proxyDataIn characteristic is null")
+                return
+            }
+            if (pdu.isEmpty()) return
+
+            // Mesh Proxy PDUs are written to the Proxy Data In characteristic.
+            // Best-effort: write without blocking.
+            try {
+                writeCharacteristic(target, pdu)
+                    .fail { _, status ->
+                        android.util.Log.e("MeshPlugin", "sendPdu write failed: $status")
+                    }
+                    .enqueue()
+            } catch (e: Exception) {
+                android.util.Log.e("MeshPlugin", "sendPdu exception: ${e.message}", e)
+            }
+        }
 
         @NonNull
         override fun getGattCallback(): BleManagerGattCallback = object : BleManagerGattCallback() {
@@ -970,9 +1085,40 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 return true // Always accept connection to see what services are available
             }
 
+            override fun onServicesInvalidated() {
+                this@MeshBleManager.proxyDataIn = null
+                this@MeshBleManager.proxyDataOut = null
+                this@MeshBleManager.batteryLevelChar = null
+                rxProxyPduType = null
+                rxProxyPduBuffer = null
+                negotiatedMtu = 23
+                lastBatteryLevel = null
+            }
+
+            override fun onMtuChanged(@NonNull gatt: BluetoothGatt, mtu: Int) {
+                negotiatedMtu = mtu
+                android.util.Log.d("MeshPlugin", "ATT MTU changed: $mtu")
+            }
+
             override fun initialize() {
                 android.util.Log.d("MeshPlugin", "BleManager.initialize() called")
                 requestMtu(517).enqueue()
+
+                // Best-effort initial Battery Level read (optional).
+                batteryLevelChar?.let { batteryChar ->
+                    try {
+                        readCharacteristic(batteryChar)
+                            .with(DataReceivedCallback { _, data ->
+                                val bytes = data.value
+                                if (bytes != null && bytes.isNotEmpty()) {
+                                    lastBatteryLevel = bytes[0].toInt() and 0xFF
+                                }
+                            })
+                            .enqueue()
+                    } catch (_: Exception) {
+                        // ignore
+                    }
+                }
                 
                 proxyDataOut?.let { char ->
                     android.util.Log.d("MeshPlugin", "Enabling notifications on proxy data out")
@@ -1049,199 +1195,26 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                             }
                         }
                     }
+
                     setNotificationCallback(char).with(onDataReceived)
-                    enableNotifications(char).enqueue()
+                    enableNotifications(char)
+                        .done {
+                            android.util.Log.d("MeshPlugin", "Proxy notifications enabled")
+                            this@MeshPlugin.isConnected = true
+                            onConnectionReady?.invoke()
+                        }
+                        .fail { _, status ->
+                            android.util.Log.e("MeshPlugin", "Failed to enable proxy notifications: $status")
+                            this@MeshPlugin.isConnected = false
+                            onConnectionFailed?.invoke()
+                        }
+                        .enqueue()
                 } ?: run {
-                    android.util.Log.w("MeshPlugin", "No proxy data out characteristic - device not configured as mesh proxy")
-                }
-                
-                // Always call ready even if mesh proxy service not found
-                // This allows us to still use the device for other GATT operations
-                android.util.Log.d("MeshPlugin", "BleManager.initialize() completed")
-            }
-            
-            override fun onDeviceReady() {
-                super.onDeviceReady()
-                android.util.Log.d("MeshPlugin", "BLE device ready - proxy connection established")
-                this@MeshPlugin.isConnected = true
-                onConnectionReady?.invoke()
-            }
-            
-            override fun onDeviceDisconnected() {
-                super.onDeviceDisconnected()
-                android.util.Log.d("MeshPlugin", "BLE device disconnected")
-                this@MeshPlugin.isConnected = false
-            }
-
-            override fun onServicesInvalidated() {
-                proxyDataIn = null
-                proxyDataOut = null
-                batteryLevelChar = null
-            }
-        }
-
-        fun sendPdu(pdu: ByteArray) {
-            if (!isConnected) {
-                android.util.Log.w("MeshPlugin", "sendPdu: not connected, cannot send ${pdu.size} bytes")
-                return
-            }
-            
-            android.util.Log.d("MeshPlugin", "sendPdu: sending ${pdu.size} bytes to proxy device")
-            proxyDataIn?.let { char ->
-                writeCharacteristic(char, pdu, BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE)
-                    .split()
-                    .enqueue()
-                android.util.Log.d("MeshPlugin", "sendPdu: write enqueued successfully")
-            } ?: run {
-                android.util.Log.e("MeshPlugin", "sendPdu: proxyDataIn characteristic is null!")
-            }
-        }
-
-        fun getGattMtu(): Int = mtu
-
-        fun getMaximumPacketSize(): Int {
-            return mtu - 3
-        }
-
-        fun getBatteryLevel(): Int? {
-            var level: Int? = null
-            batteryLevelChar?.let { char ->
-                readCharacteristic(char)
-                    .with { _, data ->
-                        level = data.value?.get(0)?.toInt()?.and(0xFF)
-                    }
-                    .enqueue()
-            }
-            return level
-        }
-    }
-    
-    /**
-     * Creates a provisioner node with GenericOnOffClient model.
-     * This is necessary to receive GenericOnOffStatus messages from devices.
-     * 
-     * Workaround: We'll use the MeshManagerApi to export and re-import the network
-     * with the provisioner node included.
-     * 
-     * @return true if successful, false otherwise
-     */
-    private fun createProvisionerNode(network: no.nordicsemi.android.mesh.MeshNetwork, unicastAddress: Int): Boolean {
-        try {
-            val provisioner = network.selectedProvisioner ?: network.provisioners.firstOrNull()
-            if (provisioner == null) {
-                android.util.Log.e("MeshPlugin", "Cannot create provisioner node: no provisioner selected")
-                return false
-            }
-            
-            // Export current mesh network to JSON
-            val networkJson = meshManagerApi.exportMeshNetwork()
-            if (networkJson == null) {
-                android.util.Log.e("MeshPlugin", "Failed to export mesh network")
-                return false
-            }
-            
-            android.util.Log.d("MeshPlugin", "Exported mesh network for modification")
-            
-            // Parse JSON and add provisioner node
-            val jsonObject = org.json.JSONObject(networkJson)
-            val nodesArray = jsonObject.optJSONArray("nodes") ?: org.json.JSONArray()
-            
-            // Check if provisioner node already exists in JSON
-            var provisionerExists = false
-            for (i in 0 until nodesArray.length()) {
-                val node = nodesArray.getJSONObject(i)
-                if (node.optInt("unicastAddress") == unicastAddress) {
-                    provisionerExists = true
-                    android.util.Log.d("MeshPlugin", "Provisioner node already exists in JSON at index $i")
-                    break
+                    android.util.Log.e("MeshPlugin", "Proxy Data Out characteristic is null; cannot enable notifications")
+                    this@MeshPlugin.isConnected = false
+                    onConnectionFailed?.invoke()
                 }
             }
-            
-            if (!provisionerExists) {
-                // Add provisioner node to JSON
-                val provisionerNodeJson = org.json.JSONObject().apply {
-                    put("UUID", provisioner.provisionerUuid.toString().uppercase())
-                    put("unicastAddress", unicastAddress)
-                    put("deviceKey", "00000000000000000000000000000000")
-                    put("security", "high")
-                    put("netKeys", org.json.JSONArray().put(org.json.JSONObject().apply {
-                        put("index", 0)
-                        put("updated", false)
-                    }))
-                    put("configComplete", true)
-                    put("name", "Provisioner Node")
-                    put("cid", "0059")
-                    put("pid", "0000")
-                    put("vid", "0000")
-                    put("crpl", "0000")
-                    put("features", org.json.JSONObject().apply {
-                        put("relay", 0)
-                        put("proxy", 0)
-                        put("friend", 0)
-                        put("lowPower", 0)
-                    })
-                    put("elements", org.json.JSONArray().put(org.json.JSONObject().apply {
-                        put("name", "Primary Element")
-                        put("elementAddress", unicastAddress)
-                        put("location", "0000")
-                        put("models", org.json.JSONArray().apply {
-                            // Configuration Server (required)
-                            put(org.json.JSONObject().apply {
-                                put("modelId", "0000")
-                                put("subscribe", org.json.JSONArray())
-                                put("bind", org.json.JSONArray())
-                            })
-                            // Health Server (required)
-                            put(org.json.JSONObject().apply {
-                                put("modelId", "0002")
-                                put("subscribe", org.json.JSONArray())
-                                put("bind", org.json.JSONArray())
-                            })
-                            // GenericOnOffClient (for receiving status messages)
-                            put(org.json.JSONObject().apply {
-                                put("modelId", "1001")
-                                put("subscribe", org.json.JSONArray())
-                                put("bind", org.json.JSONArray().put(0))
-                            })
-                        })
-                    }))
-                }
-                
-                nodesArray.put(provisionerNodeJson)
-                jsonObject.put("nodes", nodesArray)
-                
-                android.util.Log.i("MeshPlugin", "Added provisioner node to mesh network JSON")
-                
-                // Re-import the modified network
-                val modifiedJson = jsonObject.toString()
-                android.util.Log.d("MeshPlugin", "Modified JSON (first 500 chars): ${modifiedJson.take(500)}")
-                
-                try {
-                    meshManagerApi.importMeshNetworkJson(modifiedJson)
-                    meshNetwork = meshManagerApi.meshNetwork
-                    android.util.Log.d("MeshPlugin", "Import completed, checking for node...")
-                } catch (e: Exception) {
-                    android.util.Log.e("MeshPlugin", "Exception during import: ${e.message}", e)
-                    return false
-                }
-                
-                // Verify the node was added
-                val verifyNode = meshNetwork?.nodes?.firstOrNull { it.unicastAddress == unicastAddress }
-                if (verifyNode != null) {
-                    android.util.Log.i("MeshPlugin", "✓ Successfully imported mesh network with provisioner node!")
-                    return true
-                } else {
-                    android.util.Log.e("MeshPlugin", "Failed to import modified mesh network - node not found after import")
-                    android.util.Log.d("MeshPlugin", "Current nodes in network: ${meshNetwork?.nodes?.map { "0x${it.unicastAddress.toString(16)}" }}")
-                    return false
-                }
-            }
-            
-            return true // Node already exists
-            
-        } catch (e: Exception) {
-            android.util.Log.e("MeshPlugin", "Error creating provisioner node: ${e.message}", e)
-            return false
         }
     }
 }

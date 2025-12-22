@@ -65,53 +65,79 @@ class _DevicesScreenState extends State<DevicesScreen> {
             padding: const EdgeInsets.all(8.0),
             child: Row(
               children: [
-                Expanded(child: Consumer<DeviceManager>(
-                  builder: (context, mgr, _) {
-                    if (kDebugMode) {
-                          if (kDebugMode) { debugPrint('Dropdown builder groups: ${mgr.groups.map((g) => g.name).join(', ')}'); }
-                    }
-                    return DropdownButton<int>(
-                      isExpanded: true,
-                          hint: const Text('Select group'),
-                          value: _selectedGroupId,
-                      items: [
-                            const DropdownMenuItem<int>(value: _kUnknownGroupId, child: Text('Unknown')),
-                        ...mgr.groups.map((g) => DropdownMenuItem<int>(
-                                value: g.id,
-                            child: Row(children: [
-                              Container(width: 12, height: 12, margin: const EdgeInsets.only(right: 8), decoration: BoxDecoration(shape: BoxShape.circle, color: Color(g.colorValue))),
-                              Text('${g.name} (0x${g.id.toRadixString(16).toUpperCase()})')
-                            ]))),
-                      ],
-                                                onChanged: (int? v) {
-                                                  if (v == null) { return; }
-                                                  setState(() => _selectedGroupId = v);
-                                                  // Track the UI-selected group for post-scan mesh refresh.
-                                                  context.read<DeviceManager>().setActiveUiGroupId(v);
-                                                },
-                    );
-                  },
-                )),
-                const SizedBox(width: 8),
-                // Trigger group (icon) - only enabled when a group is selected.
-                Builder(builder: (context2) {
-                  // For future: read DeviceManager if needed
-                  final mgr = context.watch<DeviceManager>();
+                Expanded(
+                  child: Consumer<DeviceManager>(
+                    builder: (context, mgr, _) {
+                      if (kDebugMode) {
+                        debugPrint(
+                            'Dropdown builder groups: ${mgr.groups.map((g) => g.name).join(', ')}');
+                      }
+                      return DropdownButton<int>(
+                        isExpanded: true,
+                        hint: const Text('Select group'),
+                        value: _selectedGroupId,
+                        items: [
+                          const DropdownMenuItem<int>(
+                              value: _kUnknownGroupId, child: Text('Unknown')),
+                          ...mgr.groups.map(
+                            (g) => DropdownMenuItem<int>(
+                              value: g.id,
+                              child: Row(children: [
+                                Container(
+                                  width: 12,
+                                  height: 12,
+                                  margin: const EdgeInsets.only(right: 8),
+                                  decoration: BoxDecoration(
+                                    shape: BoxShape.circle,
+                                    color: Color(g.colorValue),
+                                  ),
+                                ),
+                                Text(
+                                    '${g.name} (0x${g.id.toRadixString(16).toUpperCase()})'),
+                              ]),
+                            ),
+                          ),
+                        ],
+                        onChanged: (value) {
+                          if (value == null) return;
+                          setState(() {
+                            _selectedGroupId = value;
+                            _selectionMode = false;
+                            _selectedMacs.clear();
+                          });
+                        },
+                      );
+                    },
+                  ),
+                ),
+                Consumer<DeviceManager>(builder: (context, mgr, _) {
                   final selectedCount = _selectionMode ? _selectedMacs.length : 0;
-                  
+
                   // Check if at least one device in the target group is ready for mesh operations
-                  final targetDevices = _selectionMode 
-                      ? mgr.devices.where((d) => _selectedMacs.contains(d.macAddress))
-                      : mgr.devices.where((d) => d.groupId == _selectedGroupId);
-                  
+                  final targetDevices = _selectionMode
+                      ? mgr.devices.where((d) =>
+                          _selectedMacs.contains(d.macAddress))
+                      : mgr.devices.where((d) =>
+                          d.groupId == _selectedGroupId);
+
                   // With native mesh plugin, we don't need device connections - just check if plugin is available
-                  final hasNativePlugin = mgr.meshClient is PlatformMeshClient && (mgr.meshClient as PlatformMeshClient).isPluginAvailable;
-                  final anyReady = hasNativePlugin || targetDevices.any((d) => d.connectionStatus == ConnectionStatus.ready || d.connectionStatus == ConnectionStatus.connected);
-                  
-                  final enabled = (_selectionMode ? selectedCount > 0 : _selectedGroupId != _kUnknownGroupId) && anyReady;
+                  final hasNativePlugin = mgr.meshClient is PlatformMeshClient &&
+                      (mgr.meshClient as PlatformMeshClient).isPluginAvailable;
+                  final anyReady = hasNativePlugin ||
+                      targetDevices.any((d) =>
+                          d.connectionStatus == ConnectionStatus.ready ||
+                          d.connectionStatus == ConnectionStatus.connected);
+
+                  final enabled =
+                      (_selectionMode ? selectedCount > 0 : _selectedGroupId != _kUnknownGroupId) &&
+                          anyReady;
                   final tooltip = _selectionMode
-                      ? (anyReady ? 'Trigger selected ($selectedCount)' : 'Connecting devices...')
-                      : (anyReady ? 'Trigger group' : 'Waiting for devices to connect...');
+                      ? (anyReady
+                          ? 'Trigger selected ($selectedCount)'
+                          : 'Connecting devices...')
+                      : (anyReady
+                          ? 'Trigger group'
+                          : 'Waiting for devices to connect...');
                   return IconButton(
                     icon: const Icon(Icons.flash_on),
                     tooltip: tooltip,

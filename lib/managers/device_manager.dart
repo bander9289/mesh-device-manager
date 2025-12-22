@@ -304,14 +304,6 @@ class DeviceManager extends ChangeNotifier {
     _periodicScanTimer = null;
   }
 
-  /// Manual scan trigger for the UI.
-  void triggerScanCycle({Duration duration = const Duration(seconds: 5)}) {
-    if (_usingMock) return;
-    if (_startupDiscoveryInProgress) return;
-    if (isScanning) return;
-    startBLEScanning(timeout: duration, clearExisting: false);
-  }
-
   /// User-triggered rescan that also runs mesh group discovery so devices can be
   /// automatically assigned to groups.
   Future<void> scanAndDiscoverGroups({
@@ -1502,31 +1494,14 @@ class DeviceManager extends ChangeNotifier {
     }
 
     final res = await completer.future;
-    await subscription?.cancel();
-    timer?.cancel();
+    await subscription.cancel();
+    timer.cancel();
 
     if (exclusive) {
       _activeTriggerStatusSubscription = null;
       _activeTriggerStatusTimer = null;
     }
     return res;
-  }
-
-  // Probe group membership by triggering and observing responses
-  // NOTE: Passive BLE scanning doesn't expose mesh subscription lists.
-  // This method is a scaffold: integrate a mesh client to send a Config Model Subscription Get
-  // or a Group message and observe model state changes to reliably detect membership.
-  Future<List<MeshDevice>> probeGroupMembers(int groupId,
-      {Duration timeout = const Duration(seconds: 3)}) async {
-    // Placeholder: in a real implementation, send a mesh group message and observe state changes.
-    // For now, return devices that are currently assigned to the group.
-    await Future.delayed(timeout);
-    final members = _devices.where((d) => d.groupId == groupId).toList();
-    if (kDebugMode) {
-      debugPrint(
-          'probeGroupMembers: found ${members.length} local members for group $groupId (placeholder)');
-    }
-    return members;
   }
 
   Future<void> refreshDeviceLightStates() async {
@@ -1687,93 +1662,6 @@ class DeviceManager extends ChangeNotifier {
       await Future.delayed(const Duration(milliseconds: 300));
     }
     // keep the app scanning state as it was; do not start or stop scans here.
-  }
-
-  /// Connect to a candidate proxy device for the given group so subsequent mesh
-  /// PDUs can be sent with low latency. Picks a candidate MAC from the group's
-  /// members and asks the native plugin to ensure a proxy connection.
-  Future<bool> connectGroupProxy(int groupId) async {
-    final candidates = _devices.where((d) => d.groupId == groupId).toList();
-    if (candidates.isEmpty) return false;
-    // prefer confirmed members if available
-    final confirmed = _confirmedGroupMembers[groupId];
-    String candidateMac = candidates.first.macAddress;
-    if (confirmed != null && confirmed.isNotEmpty) {
-      final found = candidates.firstWhere(
-          (d) => confirmed.contains(d.macAddress),
-          orElse: () => candidates.first);
-      candidateMac = found.macAddress;
-    }
-
-    // Stop scanning to free BLE resources for connection
-    final wasScanning = isScanning;
-    if (wasScanning) {
-      stopScanning(schedulePostScanRefresh: false);
-      await Future.delayed(const Duration(milliseconds: 300));
-    }
-
-    bool connected = false;
-    try {
-      if (meshClient is PlatformMeshClient) {
-        final pm = meshClient as PlatformMeshClient;
-        // Gather all device unicast addresses to configure proxy filter
-        final allUnicasts = _devices
-            .where((d) => d.unicastAddress > 0)
-            .map((d) => d.unicastAddress)
-            .toList();
-        if (kDebugMode)
-          debugPrint(
-              'DeviceManager.connectGroupProxy: ensuring proxy connection to $candidateMac with ${allUnicasts.length} devices');
-        connected = await pm.ensureProxyConnection(candidateMac,
-            deviceUnicasts: allUnicasts);
-        // Defensive: explicitly configure the filter too (native ensureProxyConnection
-        // also does this, but we want to avoid missing status packets after reconnects).
-        if (connected && allUnicasts.isNotEmpty) {
-          try {
-            await pm.configureProxyFilter(allUnicasts);
-          } catch (_) {}
-        }
-      }
-    } catch (e) {
-      if (kDebugMode)
-        debugPrint('DeviceManager.connectGroupProxy: error -> $e');
-      connected = false;
-    }
-
-    // Update device connection statuses for UI
-    for (final d in candidates) {
-      final idx = _devices.indexWhere((x) => x.macAddress == d.macAddress);
-      if (idx < 0) continue;
-      final newStatus = connected
-          ? ConnectionStatus.connecting
-          : ConnectionStatus.disconnected;
-      final cur = _devices[idx];
-      _devices[idx] = MeshDevice(
-        macAddress: cur.macAddress,
-        identifier: cur.identifier,
-        hardwareId: cur.hardwareId,
-        batteryPercent: cur.batteryPercent,
-        rssi: cur.rssi,
-        version: cur.version,
-        groupId: cur.groupId,
-        lightOn: cur.lightOn,
-        connectionStatus: newStatus,
-      );
-    }
-    notifyListeners();
-
-    if (connected) {
-      // Attempt subscription via plugin (no scan) to mark devices ready
-      try {
-        await subscribeGroupDevices(groupId, scanIfDisconnected: false);
-      } catch (_) {}
-    }
-
-    // restart scanning if it was running before
-    if (wasScanning) {
-      startBLEScanning(timeout: const Duration(seconds: 20));
-    }
-    return connected;
   }
 
   /// Unsubscribe and close any plugin-managed subscriptions for the given MAC.

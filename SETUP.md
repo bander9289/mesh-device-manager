@@ -199,39 +199,15 @@ sudo adduser $USER kvm
 4. 📦 Run `flutter pub get` in project
 5. 🏃 Test with `flutter run`
 
-### Optional: Add native Nordic nRF Mesh SDK for Android
+### Nordic Mesh dependency
 
-If you want to enable the native Android plugin to use the Nordic nRF Mesh SDK (recommended for reliable mesh messaging), perform the following:
-
-1. Add the SDK dependency to `android/app/build.gradle` (replace <version> with the SDK version you choose):
-
-```gradle
-dependencies {
-   implementation "no.nordicsemi.android:nrf-mesh:5.0.1"
-}
-```
-
-2. If required by the SDK, add additional repositories to `android/build.gradle.kts` or `android/build.gradle`:
-
-```gradle
-allprojects {
-   repositories {
-      google()
-      mavenCentral()
-      // Add any extra Maven repos required by the SDK
-   }
-}
-```
-
-3. Run a clean rebuild:
+On Android, the Nordic Mesh library is included via Maven/Gradle in `android/app/build.gradle.kts`. To change versions, update the `no.nordicsemi.android:mesh:<version>` dependency there, then run:
 
 ```bash
 flutter clean
 flutter pub get
-flutter build apk
+flutter run -d android
 ```
-
-4. The plugin will detect the SDK automatically at runtime via reflection and use it when present. If the SDK is not available or if reflection fails, the app will safely fall back to the existing simulated plugin behavior or GATT fallback.
 
 ## References
 

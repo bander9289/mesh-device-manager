@@ -156,29 +156,17 @@ flutter build apk --release
 flutter build appbundle --release
 ```
 
-### Enabling Android native nRF Mesh SDK (optional)
+### Android Nordic Mesh dependency
 
-To use the native Nordic nRF Mesh SDK for group messages on Android, add the official SDK to the app module dependencies and enable it in `android/app/build.gradle`:
+On Android, the Nordic Mesh library is pulled from Maven via Gradle dependencies in `android/app/build.gradle.kts`.
 
-1. Add the dependency (uncomment below and replace <version>):
-
-```gradle
-dependencies {
-   // implementation "no.nordicsemi.android:mesh:<version>"
-}
-```
-
-2. After including the SDK, the Android plugin (MainActivity + MeshPlugin) will dynamically detect and use it for sending mesh messages. If the SDK isn't present, the plugin falls back to the simulated behavior.
-
-3. Build and run:
+To update the Nordic Mesh library version, edit the dependency in `android/app/build.gradle.kts` (look for `no.nordicsemi.android:mesh:<version>`), then run:
 
 ```bash
 flutter clean
 flutter pub get
 flutter run -d android
 ```
-
-If you want help adding the exact Maven coordinate and version for the SDK, tell me which Nordic SDK and version you prefer and I will add it to the Gradle files.
 
 ### iOS Setup
 

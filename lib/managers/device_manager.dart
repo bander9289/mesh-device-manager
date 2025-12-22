@@ -7,6 +7,8 @@ import '../models/mesh_group.dart';
 import 'mesh_client.dart';
 import 'real_mesh_client.dart';
 import 'gatt_mesh_client.dart';
+import 'services/ble_scanning_service.dart';
+import 'services/group_store.dart';
 
 class DeviceManager extends ChangeNotifier {
   final List<MeshDevice> _devices = [];
@@ -21,17 +23,11 @@ class DeviceManager extends ChangeNotifier {
   Timer? _timer;
   Timer? _stateRefreshTimer;
   Timer? _periodicScanTimer;
-  final Map<String, DateTime> _lastAdvertLogTimes = {};
-  DateTime? _lastScanResultsLog;
-  Timer? _scanCancelTimer;
-  bool verboseLogging = false; // toggle to reduce noisy debug output
-  StreamSubscription<List<ScanResult>>? _scanSubscription;
+  late final BleScanningService _scanningService;
+  late final GroupStore _groupStore;
   // Default to real BLE scanning on Android/iOS. Keep mock default elsewhere (desktop/tests).
   bool _usingMock = !(Platform.isAndroid || Platform.isIOS);
-  bool filterMeshOnly = true; // default: only include mesh devices
-  Set<String> hardwareIdWhitelist =
-      {}; // optional: only include these hardware IDs (empty => no filter)
-  int _nextGroupAddress = 0xC000; // default base group address
+  // Scanning filters are stored on _scanningService.
 
   // Startup discovery + group scan orchestration
   bool _startupDiscoveryCompleted = false;
@@ -40,16 +36,6 @@ class DeviceManager extends ChangeNotifier {
   DateTime? _activeGroupDiscoveryDeadline;
   bool _startupDiscoveryInProgress = false;
   bool _groupDiscoveryInProgress = false;
-
-  // Simple palette we cycle through for new groups
-  static const List<int> _colorPalette = [
-    0xFF1E88E5,
-    0xFF43A047,
-    0xFFF4511E,
-    0xFF6A1B9A,
-    0xFF00897B,
-    0xFFFDD835,
-  ];
 
   late final MeshClient meshClient;
   final Map<int, Set<String>> _confirmedGroupMembers = {};
@@ -83,6 +69,13 @@ class DeviceManager extends ChangeNotifier {
   ];
 
   DeviceManager() {
+    _groupStore = GroupStore(groups: _groups, devices: _devices);
+    _scanningService = BleScanningService(
+      devices: _devices,
+      groups: _groups,
+      deviceCache: _deviceCache,
+    );
+
     // **IMPORTANT**: BLE Mesh devices don't support direct GATT connections.
     // Use platform mesh client with GATT fallback for BLE mesh communication
     final platformClient = PlatformMeshClient(
@@ -348,19 +341,11 @@ class DeviceManager extends ChangeNotifier {
   }
 
   bool _isGroupAddress(int address) {
-    // Standard group address range (0xC000–0xFEFF).
-    return address >= 0xC000 && address <= 0xFEFF;
+    return _groupStore.isGroupAddress(address);
   }
 
   void _ensureGroupExists(int groupId) {
-    if (_groups.any((g) => g.id == groupId)) return;
-    final groupName = groupId == 0xC000
-        ? 'Default'
-        : 'Group 0x${groupId.toRadixString(16).toUpperCase()}';
-    final color = _colorPalette[_groups.length % _colorPalette.length];
-    _groups.add(MeshGroup(id: groupId, name: groupName, colorValue: color));
-    _nextGroupAddress =
-        (groupId >= _nextGroupAddress) ? groupId + 1 : _nextGroupAddress;
+    _groupStore.ensureGroupExists(groupId);
   }
 
   Future<void> _refreshGroupMembershipFromMeshDatabase() async {
@@ -481,10 +466,7 @@ class DeviceManager extends ChangeNotifier {
   }
 
   List<MeshGroup> _orderedGroupsForDiscovery() {
-    // Default group (0xC000) first, then all others by creation order.
-    final def = _groups.where((g) => g.id == 0xC000).toList();
-    final rest = _groups.where((g) => g.id != 0xC000).toList();
-    return [...def, ...rest];
+    return _groupStore.orderedGroupsForDiscovery();
   }
 
   Future<bool> _ensureProxyConnected(String mac) async {
@@ -565,7 +547,7 @@ class DeviceManager extends ChangeNotifier {
     ]);
     // Assign Default group only to the first mock device; leave others unassigned
     final defaultGroupId =
-        _groups.isNotEmpty ? _groups.first.id : _nextGroupAddress;
+      _groups.isNotEmpty ? _groups.first.id : _groupStore.nextGroupAddress;
     if (_devices.isNotEmpty) {
       _devices[0].groupId = defaultGroupId; // first device assigned to Default
       // others intentionally left with groupId == null to be visible under 'Unknown'
@@ -614,176 +596,31 @@ class DeviceManager extends ChangeNotifier {
 
   MeshGroup createGroupFromDevices(List<MeshDevice> devices,
       {String? name, int? groupAddress, int? colorValue}) {
-    final id = groupAddress ?? _nextGroupAddress;
-    final groupName =
-        name ?? (id == 0xC000 ? 'Default' : 'Group-${_groups.length + 1}');
-    final color =
-        colorValue ?? _colorPalette[_groups.length % _colorPalette.length];
-    final g = MeshGroup(id: id, name: groupName, colorValue: color);
-    _groups.add(g);
-    if (kDebugMode) {
-      debugPrint(
-          'createGroupFromDevices: created group ${g.name} id=${g.id} color=0x${g.colorValue.toRadixString(16)} assigned ${devices.length} devices');
-    }
-    _nextGroupAddress = (id >= _nextGroupAddress) ? id + 1 : _nextGroupAddress;
-    for (final d in devices) {
-      final idx = _devices.indexWhere((x) => x.macAddress == d.macAddress);
-      if (idx >= 0) {
-        _devices[idx].groupId = g.id;
-      }
-    }
+    final g = _groupStore.createGroupFromDevices(
+      devices,
+      name: name,
+      groupAddress: groupAddress,
+      colorValue: colorValue,
+    );
     notifyListeners();
     return g;
   }
 
   /// Get cached BluetoothDevice by MAC address
   BluetoothDevice? getCachedDevice(String mac) {
-    final normalized = mac.toLowerCase().replaceAll(':', '-');
-    return _deviceCache[normalized];
+    return _scanningService.getCachedDevice(mac);
   }
 
   void startBLEScanning({Duration? timeout, bool clearExisting = false}) {
-    if (_scanSubscription != null) {
+    if (_scanningService.isScanning) {
       return;
     }
-    // Optionally clear current devices but keep cache
-    if (clearExisting) {
-      _devices.clear();
-    }
-    if (kDebugMode)
-      debugPrint('startBLEScanning: starting (clearExisting=$clearExisting)');
-    _scanSubscription = FlutterBluePlus.scanResults.listen((results) {
-      // Helpful scan diagnostics when only a few results appear.
-      if (kDebugMode && results.isNotEmpty && results.length <= 4) {
-        final macs = results
-            .map((r) => r.device.remoteId
-                .toString()
-                .toLowerCase()
-                .replaceAll('-', ':'))
-            .join(',');
-        debugPrint('startBLEScanning: raw scan results (${results.length}) macs=$macs');
-      }
-      if (kDebugMode && results.isNotEmpty) {
-        final now = DateTime.now();
-        if (_lastScanResultsLog == null ||
-            now.difference(_lastScanResultsLog!).inSeconds > 10) {
-          _lastScanResultsLog = now;
-          debugPrint('startBLEScanning: got ${results.length} scan results');
-        }
-      }
-      var changed = false;
-      for (final r in results) {
-        if (filterMeshOnly && !_isMeshAdvertisement(r)) {
-          // If we're seeing very few results, log what we're skipping to
-          // differentiate radio issues from filter issues.
-          if (kDebugMode && results.length <= 4) {
-            final mac = r.device.remoteId
-                .toString()
-                .toLowerCase()
-                .replaceAll('-', ':');
-            String name = '';
-            try {
-              final adv = r.advertisementData.advName;
-              name = adv.isNotEmpty ? adv : r.device.platformName;
-            } catch (_) {
-              name = r.device.platformName;
-            }
-            final uuids = r.advertisementData.serviceUuids
-                .map((u) => u.toString())
-                .join(',');
-            final hasMfg = r.advertisementData.manufacturerData.isNotEmpty;
-            debugPrint(
-                'startBLEScanning: skipping (non-mesh) mac=$mac name="$name" uuids=[$uuids] mfg=$hasMfg');
-          }
-          continue;
-        }
-        final mac =
-            r.device.remoteId.toString().toLowerCase().replaceAll('-', ':');
-        // Cache the BluetoothDevice object for later use
-        final cacheKey = mac.replaceAll(':', '-');
-        _deviceCache[cacheKey] = r.device;
-        final identifier = (r.device.platformName.isNotEmpty)
-            ? r.device.platformName
-            : (mac.length >= 8 ? mac.substring(mac.length - 8) : mac);
-        // Extract hardwareId from manufacturerData if present
-        String hw = 'unknown';
-        int battery = -1;
-        if (r.advertisementData.manufacturerData.isNotEmpty) {
-          final entry = r.advertisementData.manufacturerData.entries.first;
-          hw = entry.value
-              .map((b) => b.toRadixString(16).padLeft(2, '0'))
-              .join();
-          // try to decode a battery byte if length >=1
-          if (entry.value.isNotEmpty) {
-            battery = entry.value.first;
-          }
-        }
-        final version = r.advertisementData.serviceUuids.isNotEmpty
-            ? r.advertisementData.serviceUuids.join(',')
-            : '';
-        final device = MeshDevice(
-          macAddress: mac,
-          identifier: identifier,
-          hardwareId: hw,
-          batteryPercent: battery < 0 ? 0 : battery,
-          rssi: r.rssi,
-          version: version,
-          lightOn: false,
-        );
-        // Apply optional hardware whitelist filter
-        if (hardwareIdWhitelist.isNotEmpty &&
-            !hardwareIdWhitelist.contains(device.hardwareId)) {
-          continue;
-        }
-        final idx = _devices.indexWhere((d) => d.macAddress == mac);
-        if (idx >= 0) {
-          final existing = _devices[idx];
-          final defaultGroupId =
-              _groups.any((g) => g.id == 0xC000) ? 0xC000 : null;
-          final nextGroupId = existing.groupId ?? defaultGroupId;
-          // update rssi and battery
-          if (existing.rssi != device.rssi ||
-              existing.batteryPercent != device.batteryPercent ||
-              nextGroupId != existing.groupId) {
-            _devices[idx] = MeshDevice(
-              macAddress: existing.macAddress,
-              identifier: existing.identifier,
-              hardwareId: device.hardwareId,
-              batteryPercent: device.batteryPercent,
-              rssi: device.rssi,
-              version: device.version,
-              groupId: nextGroupId,
-              lightOn: existing.lightOn,
-            );
-            changed = true;
-            if (kDebugMode && verboseLogging)
-              debugPrint(
-                  'Updated device $mac rssi=${device.rssi} battery=${device.batteryPercent}');
-          }
-        } else {
-          // If we can't reliably infer group membership yet, default new devices to Default group.
-          // This prevents newly discovered nodes (including proxies) from lingering in "Unknown".
-          if (device.groupId == null && _groups.any((g) => g.id == 0xC000)) {
-            device.groupId = 0xC000;
-          }
-          _devices.add(device);
-          if (kDebugMode && verboseLogging)
-            debugPrint(
-                'Added new device $mac id=$identifier hw=$hw rssi=${r.rssi}');
-          changed = true;
-        }
-      }
-      if (changed) notifyListeners();
-    });
-    final dur = timeout ?? const Duration(seconds: 20);
-    FlutterBluePlus.startScan(timeout: dur);
-    // Ensure we stop scanning after the duration in case the plugin doesn't automatically
-    _scanCancelTimer?.cancel();
-    _scanCancelTimer = Timer(dur, () {
-      try {
-        stopScanning();
-      } catch (_) {}
-    });
+    _scanningService.start(
+      timeout: timeout,
+      clearExisting: clearExisting,
+      onDevicesChanged: notifyListeners,
+    );
+
     // start periodic state refresh to detect On/Off states via GATT/native
     _stateRefreshTimer?.cancel();
     _stateRefreshTimer = Timer.periodic(_getRefreshInterval(), (_) async {
@@ -806,91 +643,14 @@ class DeviceManager extends ChangeNotifier {
     return Duration(seconds: seconds);
   }
 
-  bool _isMeshAdvertisement(ScanResult r) {
-    final mac = r.device.remoteId.toString().toLowerCase().replaceAll('-', ':');
-    // 1) Mesh Proxy / Provisioning service UUIDs (provisioned/unprovisioned)
-    final uuids = r.advertisementData.serviceUuids
-        .map((u) => u.toString().toLowerCase())
-        .toList();
-    if (uuids.any((u) =>
-        u.contains('00001828') ||
-        u.contains('00001827') ||
-        u.contains('1828') ||
-        u.contains('1827'))) {
-      if (_shouldLogAdvert(mac) && kDebugMode && verboseLogging) {
-        debugPrint(
-            'Mesh advertisement: service uuid present (${uuids.join(',')})');
-      }
-      return true;
-    }
-
-    // 2) Name heuristic - we brand our devices 'KMv' at the start of the advertised name
-    String name = '';
-    try {
-      final adv = r.advertisementData.advName;
-      name = adv.isNotEmpty ? adv : r.device.platformName;
-    } catch (_) {
-      name = r.device.platformName;
-    }
-    if (name.isNotEmpty) {
-      final nm = name.toLowerCase();
-      if (nm.startsWith('kmv')) {
-        if (_shouldLogAdvert(mac) && kDebugMode && verboseLogging) {
-          debugPrint('Mesh advertisement: name starts with KMv: $name');
-        }
-        return true;
-      }
-      // also match the hw-version-hash pattern
-      final nameRegex = RegExp(r'^[A-Z0-9\-]+-\d+\.\d+\.\d+-[a-f0-9]+\b',
-          caseSensitive: false);
-      if (nameRegex.hasMatch(name)) {
-        if (_shouldLogAdvert(mac) && kDebugMode && verboseLogging) {
-          debugPrint('Mesh advertisement: matches firmware pattern: $name');
-        }
-        return true;
-      }
-    }
-
-    // 3) Manufacturer data heuristic - fallback: some mesh devices include private bytes
-    // Only accept this fallback if it matches a hardware whitelist entry explicitly.
-    if (r.advertisementData.manufacturerData.isNotEmpty) {
-      try {
-        final entry = r.advertisementData.manufacturerData.entries.first;
-        final hw =
-            entry.value.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
-        if (_shouldLogAdvert(mac) && kDebugMode && verboseLogging) {
-          debugPrint('Mesh advertisement: manufacturer data present hw=$hw');
-        }
-        if (hardwareIdWhitelist.isNotEmpty &&
-            hardwareIdWhitelist.contains(hw)) {
-          return true;
-        }
-      } catch (_) {}
-    }
-
-    // otherwise, not a mesh device
-    return false;
-  }
-
-  bool _shouldLogAdvert(String mac) {
-    final now = DateTime.now();
-    final last = _lastAdvertLogTimes[mac];
-    if (last == null || now.difference(last).inSeconds > 10) {
-      _lastAdvertLogTimes[mac] = now;
-      return true;
-    }
-    return false;
-  }
-
   void stopScanning({bool schedulePostScanRefresh = true}) {
-    _scanSubscription?.cancel();
-    _scanSubscription = null;
-    FlutterBluePlus.stopScan();
     _stateRefreshTimer?.cancel();
-    _scanCancelTimer?.cancel();
-    _scanCancelTimer = null;
     _stateRefreshTimer = null;
-    notifyListeners(); // Update UI to remove scanning indicator
+    if (_scanningService.isScanning) {
+      _scanningService.stop(onDevicesChanged: notifyListeners);
+    } else {
+      notifyListeners(); // Update UI to remove scanning indicator
+    }
 
     // After each scan cycle, refresh UI state via mesh GenericOnOffGet for the active group.
     // Avoid doing this for internal scan pauses (trigger operations pass schedulePostScanRefresh=false).
@@ -899,26 +659,11 @@ class DeviceManager extends ChangeNotifier {
     }
   }
 
-  bool get isScanning => _scanSubscription != null;
+  bool get isScanning => _scanningService.isScanning;
 
   // move devices to group
   void moveDevicesToGroup(List<MeshDevice> devices, int targetGroupId) {
-    for (final d in devices) {
-      final idx = _devices.indexWhere((x) => x.macAddress == d.macAddress);
-      if (idx >= 0) {
-        final existing = _devices[idx];
-        _devices[idx] = MeshDevice(
-          macAddress: existing.macAddress,
-          identifier: existing.identifier,
-          hardwareId: existing.hardwareId,
-          batteryPercent: existing.batteryPercent,
-          rssi: existing.rssi,
-          version: existing.version,
-          groupId: targetGroupId,
-          lightOn: existing.lightOn,
-        );
-      }
-    }
+    _groupStore.moveDevicesToGroup(devices, targetGroupId);
     notifyListeners();
   }
 
@@ -1773,6 +1518,7 @@ class DeviceManager extends ChangeNotifier {
     stopPeriodicScanCycles();
     stopScanning(schedulePostScanRefresh: false);
     stopMockScanning();
+    _scanningService.dispose();
     super.dispose();
   }
 }

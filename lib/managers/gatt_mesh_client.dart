@@ -187,7 +187,7 @@ class GattMeshClient implements MeshClient {
             }
           } catch (e) {
             await stateSubscription.cancel();
-            throw e;
+            rethrow;
           }
         } on TimeoutException catch (e) {
           lastError = e;

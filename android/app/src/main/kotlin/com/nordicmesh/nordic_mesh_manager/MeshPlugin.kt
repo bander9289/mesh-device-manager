@@ -91,8 +91,34 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             "writeCharacteristic" -> writeCharacteristic(call, result)
             "setNotify" -> setNotify(call, result)
             "discoverGroupMembers" -> discoverGroupMembers(call, result)
+            "getNodeSubscriptions" -> getNodeSubscriptions(call, result)
             "sendUnicastMessage" -> sendUnicastMessage(call, result)
             else -> result.notImplemented()
+        }
+    }
+
+    private fun getNodeSubscriptions(call: MethodCall, result: MethodChannel.Result) {
+        scope.launch {
+            try {
+                val network = meshNetwork ?: meshManagerApi.meshNetwork
+                if (network == null) {
+                    result.success(emptyList<Any>())
+                    return@launch
+                }
+
+                // Best-effort: return the known nodes. Subscription parsing can be added later.
+                val nodes = network.nodes.map { node ->
+                    mapOf(
+                        "unicastAddress" to node.unicastAddress,
+                        "name" to (node.nodeName ?: ""),
+                        "subscriptions" to emptyList<Int>()
+                    )
+                }
+
+                result.success(nodes)
+            } catch (e: Exception) {
+                result.error("NODE_SUBSCRIPTIONS_ERROR", e.message, null)
+            }
         }
     }
 

@@ -32,6 +32,9 @@ linter:
 # https://dart.dev/guides/language/analysis-options
 
 analyzer:
+  # NOTE: Quote glob patterns that start with `*` (e.g. "**/*.g.dart").
+  # Unquoted `*`/`**` can be parsed by YAML as alias syntax, causing a parse
+  # error like “Undefined alias” and breaking `flutter analyze`.
   exclude:
     - android/**
     - ios/**

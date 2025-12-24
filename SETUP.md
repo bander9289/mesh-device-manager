@@ -132,6 +132,12 @@ Once Flutter and Android are configured:
    flutter analyze --fatal-infos --fatal-warnings
    ```
 
+   Notes:
+   - Analyzer configuration lives in `analysis_options.yaml`.
+   - If you edit `analyzer: exclude:` globs, quote any pattern starting with `*` (e.g. `"**/*.g.dart"`).
+     Unquoted `*`/`**` can be parsed by YAML as an alias, which breaks `flutter analyze` with an “Undefined alias” error.
+   - Excludes are intentionally broad for platform/build/generated outputs (e.g. `android/`, `ios/`, `linux/`, `build/`, `.dart_tool/`, and `**/generated/**`) so analysis focuses on our Dart sources.
+
 3. **Run on Device/Emulator:**
    ```bash
    # List devices

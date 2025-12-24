@@ -11,91 +11,37 @@ class PlatformMeshClient implements MeshClient {
 
   final MeshClient _fallback;
   bool _available = false;
-  final Map<String, DateTime> _recentPduInvocations = {};
-  final Map<String, List<Function(String, String, List<int>)>> _nativeCharListeners = {};
-  final Map<String, int> _deviceBatteryLevels = {}; // Track battery levels from native callbacks
-  Function(String mac, int battery)? _onBatteryUpdate;
-  Function(String mac)? _onSubscriptionReady;
   Function(int unicastAddress, bool state, bool? targetState)? _onDeviceStatus;
   
   bool get isPluginAvailable => _available;
 
   PlatformMeshClient({MeshClient? fallback}) : _fallback = fallback ?? MockMeshClient(() => []) {
-    // Listen for callbacks from native plugin (e.g., created PDUs)
+    // Listen for callbacks from native plugin.
+    // NOTE: Per METHOD_CHANNEL_CONTRACT.md, Android currently emits only `onDeviceStatus`.
     _channel.setMethodCallHandler((call) async {
-      if (call.method == 'onDeviceStatus') {
-        try {
-          final args = call.arguments as Map<dynamic, dynamic>?;
-          if (args == null) return;
-          final unicastAddress = args['unicastAddress'] as int;
-          final state = args['state'] as bool;
-          final targetState = args['targetState'] as bool?;
-          if (kDebugMode) debugPrint('PlatformMeshClient: status from 0x${unicastAddress.toRadixString(16)}: state=$state, target=$targetState');
-          _onDeviceStatus?.call(unicastAddress, state, targetState);
-        } catch (e) {
-          if (kDebugMode) debugPrint('PlatformMeshClient: error handling onDeviceStatus: $e');
-        }
-      }
-      if (call.method == 'onMeshPduCreated') {
-        try {
-          final args = call.arguments as Map<dynamic, dynamic>?;
-          if (args == null) return;
-          final macs = (args['macs'] as List?)?.cast<String>() ?? [];
-          final groupId = args['groupId'] as int? ?? 0;
-          final fallback = args['fallback'] as bool? ?? true;
-          if (kDebugMode) debugPrint('PlatformMeshClient: onMeshPduCreated: group=$groupId macs=${macs.length}');
-          final key = '$groupId:${macs.join(',')}';
-          final now = DateTime.now();
-          final prev = _recentPduInvocations[key];
-          if (prev != null && now.difference(prev).inMilliseconds < 1500) {
-            if (kDebugMode) debugPrint('PlatformMeshClient: ignoring duplicate pdu callback for $key');
-            return;
-          }
-          _recentPduInvocations[key] = now;
-          // If fallback is a GattMeshClient, use it to send a group toggle; fall back to generic sendGroupMessage
-          if (fallback) {
-            await _fallback.sendGroupMessage(groupId, macs);
-          } else {
-            if (kDebugMode) debugPrint('PlatformMeshClient: plugin indicates transport is handled natively; no GATT fallback.');
-          }
-        } catch (_) {
-          // ignore
-        }
-      }
-      if (call.method == 'onCharacteristicNotification') {
-        try {
-          final args = call.arguments as Map<dynamic, dynamic>?;
-          if (args == null) return;
-          final mac = (args['mac'] as String).toLowerCase().replaceAll('-', ':');
-          final uuid = args['uuid'] as String;
-          final valueList = (args['value'] as List).map((e) => (e as int)).toList();
-          final listeners = _nativeCharListeners[mac];
-          if (listeners != null) {
-            for (final l in listeners) {
-              try { l(mac, uuid, valueList); } catch (_) {}
+      switch (call.method) {
+        case 'onDeviceStatus':
+          try {
+            final args = call.arguments as Map<dynamic, dynamic>?;
+            if (args == null) return;
+            final unicastAddress = args['unicastAddress'] as int;
+            final state = args['state'] as bool;
+            final targetState = args['targetState'] as bool?;
+            if (kDebugMode) {
+              debugPrint(
+                'PlatformMeshClient: status from 0x${unicastAddress.toRadixString(16)}: state=$state, target=$targetState',
+              );
+            }
+            _onDeviceStatus?.call(unicastAddress, state, targetState);
+          } catch (e) {
+            if (kDebugMode) {
+              debugPrint('PlatformMeshClient: error handling onDeviceStatus: $e');
             }
           }
-        } catch (e) { /* ignore */ }
-      }
-      if (call.method == 'onBatteryLevel') {
-        try {
-          final args = call.arguments as Map<dynamic, dynamic>?;
-          if (args == null) return;
-          final mac = (args['mac'] as String).toLowerCase().replaceAll('-', ':');
-          final battery = args['battery'] as int;
-          _deviceBatteryLevels[mac] = battery;
-          if (kDebugMode) debugPrint('PlatformMeshClient: battery level for $mac = $battery%');
-          _onBatteryUpdate?.call(mac, battery);
-        } catch (e) { /* ignore */ }
-      }
-      if (call.method == 'onSubscriptionReady') {
-        try {
-          final args = call.arguments as Map<dynamic, dynamic>?;
-          if (args == null) return;
-          final mac = (args['mac'] as String).toLowerCase().replaceAll('-', ':');
-          if (kDebugMode) debugPrint('PlatformMeshClient: subscription ready for $mac');
-          _onSubscriptionReady?.call(mac);
-        } catch (e) { /* ignore */ }
+          return;
+        default:
+          // Ignore unknown/unimplemented callbacks.
+          return;
       }
     });
   }
@@ -170,24 +116,12 @@ class PlatformMeshClient implements MeshClient {
     if (!_available) return _fallback.getBatteryLevels(macAddresses);
     try {
       final res = await _channel.invokeMethod<Map>('getBatteryLevels', {'macs': macAddresses});
-      if (res == null) {
-        // Return cached battery levels from callbacks
-        final out = <String, int>{};
-        for (final mac in macAddresses) {
-          final normalized = mac.toLowerCase().replaceAll('-', ':');
-          out[mac] = _deviceBatteryLevels[normalized] ?? 0;
-        }
-        final hasAny = out.values.any((v) => v > 0);
-        if (hasAny) return out;
-        return await _fallback.getBatteryLevels(macAddresses);
-      }
+      if (res == null) return await _fallback.getBatteryLevels(macAddresses);
       final out = <String, int>{};
       res.forEach((k, v) {
         try {
-          final normalized = k.toLowerCase().replaceAll('-', ':');
           final battery = v as int;
           out[k] = battery;
-          _deviceBatteryLevels[normalized] = battery;
         } catch (_) {
           out[k] = 0;
         }
@@ -195,16 +129,7 @@ class PlatformMeshClient implements MeshClient {
       // if the plugin returns no useful data (all zeros), use cached or fallback
       final hasUseful = out.values.any((v) => v > 0);
       if (!hasUseful) {
-        // Check cached values
-        for (final mac in macAddresses) {
-          final normalized = mac.toLowerCase().replaceAll('-', ':');
-          if (_deviceBatteryLevels.containsKey(normalized)) {
-            out[mac] = _deviceBatteryLevels[normalized]!;
-          }
-        }
-        if (!out.values.any((v) => v > 0)) {
-          return _fallback.getBatteryLevels(macAddresses);
-        }
+        return _fallback.getBatteryLevels(macAddresses);
       }
       return out;
     } on MissingPluginException catch (e) {
@@ -215,16 +140,6 @@ class PlatformMeshClient implements MeshClient {
       if (kDebugMode) debugPrint('PlatformMeshClient.getBatteryLevels: exception -> $e');
       return _fallback.getBatteryLevels(macAddresses);
     }
-  }
-  
-  /// Set callback for battery level updates
-  void setBatteryUpdateCallback(Function(String mac, int battery) callback) {
-    _onBatteryUpdate = callback;
-  }
-  
-  /// Set callback for subscription ready notifications
-  void setSubscriptionReadyCallback(Function(String mac) callback) {
-    _onSubscriptionReady = callback;
   }
   
   void setDeviceStatusCallback(Function(int unicastAddress, bool state, bool? targetState) callback) {
@@ -351,21 +266,8 @@ class PlatformMeshClient implements MeshClient {
     if (!_available) return _fallback.subscribeToDeviceCharacteristics(macAddress, characteristicUuids, onNotify: onNotify);
     try {
       final res = await _channel.invokeMethod<bool>('subscribeToCharacteristics', {'mac': macAddress, 'uuids': characteristicUuids});
-      if (res != null && res == true) {
-        if (onNotify != null) {
-          final mac = macAddress.toLowerCase().replaceAll('-', ':');
-          final list = _nativeCharListeners.putIfAbsent(mac, () => []);
-          list.add(onNotify);
-        }
-        return true;
-      }
-      final acted = await _fallback.subscribeToDeviceCharacteristics(macAddress, characteristicUuids, onNotify: onNotify, allowScan: allowScan);
-      if (acted && onNotify != null) {
-        final mac = macAddress.toLowerCase().replaceAll('-', ':');
-        final list = _nativeCharListeners.putIfAbsent(mac, () => []);
-        list.add(onNotify);
-      }
-      return acted;
+      if (res == true) return true;
+      return _fallback.subscribeToDeviceCharacteristics(macAddress, characteristicUuids, onNotify: onNotify, allowScan: allowScan);
     } on MissingPluginException catch (e) {
       if (kDebugMode) debugPrint('PlatformMeshClient.subscribeToDeviceCharacteristics: MissingPluginException! Setting _available=false -> $e');
       _available = false;
@@ -476,7 +378,6 @@ class PlatformMeshClient implements MeshClient {
   }
 
   void removeNativeCharListenersForMac(String macAddress) {
-    final mac = macAddress.toLowerCase().replaceAll('-', ':');
-    _nativeCharListeners.remove(mac);
+    // No-op: Android does not currently emit characteristic notification callbacks.
   }
 }

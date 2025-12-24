@@ -86,40 +86,6 @@ class DeviceManager extends ChangeNotifier {
       ),
     );
 
-    // Set up callbacks for battery updates and subscription ready notifications
-    platformClient.setBatteryUpdateCallback((mac, battery) {
-      final device = _devices
-          .where((d) => normalizeMac(d.macAddress) == normalizeMac(mac))
-          .firstOrNull;
-      if (device != null) {
-        device.batteryPercent = battery;
-        device.connectionStatus =
-            ConnectionStatus.ready; // Battery read means device is fully ready
-        notifyListeners();
-        if (kDebugMode) {
-          debugPrint(
-              'DeviceManager: updated battery for $mac to $battery% (device ready)');
-        }
-      }
-    });
-
-    platformClient.setSubscriptionReadyCallback((mac) {
-      final device = _devices
-          .where((d) => normalizeMac(d.macAddress) == normalizeMac(mac))
-          .firstOrNull;
-      if (device != null) {
-        device.connectionStatus =
-            ConnectionStatus.connected; // Mark as connected
-        notifyListeners();
-        if (kDebugMode) {
-          debugPrint(
-              'DeviceManager: subscription ready for $mac (waiting for battery)');
-        }
-      }
-      // Refresh device states when subscription is ready
-      refreshDeviceLightStates();
-    });
-
     meshClient = platformClient;
 
     // Set up callback to receive GenericOnOffStatus messages from devices

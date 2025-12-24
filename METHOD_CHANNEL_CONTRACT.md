@@ -202,8 +202,9 @@ Android sends these by calling `methodChannel.invokeMethod(name, payload)`.
   - May arrive multiple times for the same device
   - Delivered on the Android main thread (posted via `Dispatchers.Main`)
 
-### Events expected by Dart but NOT emitted on Android today
-Dart’s `PlatformMeshClient` currently registers handlers for these, but Android does not send them yet:
+### Reserved events (not emitted by Android today)
+These event names are reserved for future platform work. Android does not emit them today.
+As of 2025-12-24, Dart does not rely on them for core flows.
 
 - `onMeshPduCreated` payload (Dart expectation): `{ macs: List<String>, groupId: int, fallback: bool }`
   - Decision: on Android, PDUs are sent directly via the mesh proxy manager, so this event is currently **unused**.

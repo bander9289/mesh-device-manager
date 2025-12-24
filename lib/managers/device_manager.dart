@@ -767,110 +767,16 @@ class DeviceManager extends ChangeNotifier {
             }
             return -1; // signal that group trigger did not succeed due to missing native implementation
           }
-          // Plugin was available and handled PDU, but no devices changed state — attempt plugin-side GATT writes
+          // Plugin was available and handled PDU, but no devices changed state.
+          // The Android MethodChannel GATT primitives are intentionally stubbed; use the Dart GATT fallback.
           if (pluginHandled && (Platform.isAndroid || Platform.isIOS)) {
             if (kDebugMode) {
               debugPrint(
-                  'triggerGroup: plugin handled PDU but no state change observed — trying plugin GATT writes then GATT fallback');
+                  'triggerGroup: plugin handled PDU but no state change observed — trying Dart GATT fallback');
             }
-            final pluginWroteMacs = <String>{};
-            final candidateUuids = [
-              '0000ff01-0000-1000-8000-00805f9b34fb',
-              '0000fff3-0000-1000-8000-00805f9b34fb',
-              '0000ff02-0000-1000-8000-00805f9b34fb',
-              '00002a19-0000-1000-8000-00805f9b34fb',
-            ];
-            for (final mac in groupMemberMacs) {
-              try {
-                final connected = await pm.isDeviceConnectedNative(mac);
-                if (!connected) continue;
-                // discover services and pick a candidate characteristic
-                final svc = await pm.discoverServices(mac);
-                if (svc == null || svc['services'] == null) continue;
-                String? targetUuid;
-                final services =
-                    (svc['services'] as List).cast<Map<String, dynamic>>();
-                // 1) match vendor candidates
-                for (final s in services) {
-                  final chars = (s['characteristics'] as List)
-                      .cast<Map<String, dynamic>>();
-                  for (final c in chars) {
-                    final uuid = (c['uuid'] as String).toLowerCase();
-                    for (final cand in candidateUuids) {
-                      if (uuid.contains(
-                              cand.replaceAll('-', '').toLowerCase()) ||
-                          uuid == cand.toLowerCase()) {
-                        targetUuid = uuid;
-                        break;
-                      }
-                    }
-                    if (targetUuid != null) break;
-                  }
-                  if (targetUuid != null) break;
-                }
-                // 2) fallback: pick a writable characteristic
-                if (targetUuid == null) {
-                  for (final s in services) {
-                    final chars = (s['characteristics'] as List)
-                        .cast<Map<String, dynamic>>();
-                    for (final c in chars) {
-                      if (c['write'] == true) {
-                        targetUuid = (c['uuid'] as String).toLowerCase();
-                        break;
-                      }
-                    }
-                    if (targetUuid != null) break;
-                  }
-                }
-                // 3) fallback: pick a readable characteristic if no writable found
-                if (targetUuid == null) {
-                  for (final s in services) {
-                    final chars = (s['characteristics'] as List)
-                        .cast<Map<String, dynamic>>();
-                    for (final c in chars) {
-                      if (c['read'] == true) {
-                        targetUuid = (c['uuid'] as String).toLowerCase();
-                        break;
-                      }
-                    }
-                    if (targetUuid != null) break;
-                  }
-                }
-                if (targetUuid == null) continue;
-                // read current value if supported
-                List<int>? cur;
-                try {
-                  cur = await pm.readCharacteristic(mac, targetUuid);
-                } catch (_) {
-                  cur = null;
-                }
-                final isOn = cur != null && cur.isNotEmpty && cur.first == 0x01;
-                final newVal = [isOn ? 0x00 : 0x01];
-                final ok = await pm.writeCharacteristic(mac, targetUuid, newVal,
-                    withResponse: true);
-                if (ok) {
-                  pluginWroteMacs.add(mac);
-                  if (kDebugMode) {
-                    debugPrint(
-                        'triggerGroup: plugin wrote characteristic $targetUuid for $mac');
-                  }
-                }
-              } catch (e) {
-                if (kDebugMode) {
-                  debugPrint(
-                      'triggerGroup: plugin char write failed for $mac -> $e');
-                }
-              }
-            }
-            // If the plugin couldn't perform writes for some members, fallback to direct GATT fallback for those MACs
-            final macsToFallback = groupMemberMacs
-                .where((m) => !pluginWroteMacs.contains(m))
-                .toList();
-            if (macsToFallback.isNotEmpty) {
-              try {
-                await pm.forceGATTFallbackSend(groupId, macsToFallback);
-              } catch (_) {}
-            }
+            try {
+              await pm.forceGATTFallbackSend(groupId, groupMemberMacs);
+            } catch (_) {}
             // wait and re-poll states
             await Future.delayed(const Duration(seconds: 1));
             final after2 = await meshClient.getLightStates(macs);
@@ -1414,15 +1320,7 @@ class DeviceManager extends ChangeNotifier {
     final normalized = normalizeMac(mac);
     if (_pluginSubscribedMacs.contains(normalized)) {
       try {
-        if (meshClient is PlatformMeshClient) {
-          final pm = meshClient as PlatformMeshClient;
-          try {
-            pm.removeNativeCharListenersForMac(normalized);
-          } catch (_) {}
-          try {
-            await pm.disconnectDeviceNative(normalized);
-          } catch (_) {}
-        }
+        // Android MethodChannel GATT disconnect is stubbed; subscriptions are handled by FlutterBlue/GATT.
       } catch (_) {}
       _pluginSubscribedMacs.remove(normalized);
     }

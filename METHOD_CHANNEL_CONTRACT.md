@@ -150,7 +150,10 @@ Side effects:
   - `BATTERY_READ_ERROR`
 
 ### Stubbed / not-implemented-yet methods
-These are handled by Android, but currently return a fixed stub value:
+These are handled by Android, but currently return a fixed stub value.
+
+Decision (hybrid approach): the app treats these as **unsupported** and uses FlutterBlue/GATT on the Dart side for services/characteristics/BAS.
+These methods may be removed from Android in the future once all callers are deleted.
 
 - `getLightStates`
   - Args: `{ macs: List<String> }`

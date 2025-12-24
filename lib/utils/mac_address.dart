@@ -1,14 +1,11 @@
-/// Utilities for working with BLE MAC addresses / FlutterBluePlus remoteIds.
-///
-/// Canonical representation used across the app is:
-/// - lowercase
-/// - colon-separated (e.g. "aa:bb:cc:dd:ee:ff")
-///
-/// IMPORTANT: Some call sites intentionally distinguish `null` vs empty lists
-/// when passing MAC collections across layers (e.g. broadcast semantics).
-
-library mac_address;
-
+// Utilities for working with BLE MAC addresses / FlutterBluePlus remoteIds.
+//
+// Canonical representation used across the app is:
+// - lowercase
+// - colon-separated (e.g. "aa:bb:cc:dd:ee:ff")
+//
+// IMPORTANT: Some call sites intentionally distinguish `null` vs empty lists
+// when passing MAC collections across layers (e.g. broadcast semantics).
 
 /// Returns a canonical, comparable MAC form: lowercase + colon-separated.
 ///

@@ -1010,7 +1010,7 @@ class DeviceManager extends ChangeNotifier {
         final groupId = _activeUiGroupId;
         if (groupId == -1) return; // Unknown
         final groupDevices =
-            _devices.where((d) => d.groupId == groupId).toList();
+          _devices.where((d) => d.groupId == groupId && d.unicastAddress > 0).toList();
         if (groupDevices.isEmpty) return;
 
         // Pick a proxy candidate MAC (prefer confirmed members).
@@ -1035,8 +1035,26 @@ class DeviceManager extends ChangeNotifier {
         await Future.delayed(const Duration(milliseconds: 250));
 
         final targetMacs = groupDevices.map((d) => d.macAddress).toSet();
-        // Send GenericOnOffGet per device (unicast).
-        for (final d in groupDevices) {
+
+        // Capability probe: if native doesn't support GenericOnOffGet yet, bail quickly.
+        // (Android currently stubs this and returns false.)
+        bool supported = false;
+        try {
+          supported = await pm.sendUnicastGet(groupDevices.first.unicastAddress,
+              proxyMac: proxyMac);
+        } catch (_) {
+          supported = false;
+        }
+        if (!supported) {
+          if (kDebugMode) {
+            debugPrint(
+                'post-scan mesh refresh: sendUnicastGet unsupported; skipping refresh');
+          }
+          return;
+        }
+
+        // We already sent a Get to the first device above; continue with the rest.
+        for (final d in groupDevices.skip(1)) {
           try {
             final ok =
                 await pm.sendUnicastGet(d.unicastAddress, proxyMac: proxyMac);

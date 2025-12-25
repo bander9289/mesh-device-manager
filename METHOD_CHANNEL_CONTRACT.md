@@ -183,15 +183,18 @@ These methods may be removed from Android in the future once all callers are del
   - Args: `{ mac: String, uuid: String, enabled: bool }`
   - Returns: `false`
 
-### Dart-only methods (NOT implemented on Android)
-These methods are invoked by Dart but are **not present** in Android’s `onMethodCall` switch today; Android returns `notImplemented()`, and Dart will throw `MissingPluginException`.
-
 - `configureProxyFilter`
-  - Dart args: `{ deviceUnicasts: List<int> }`
-  - Intended return: `bool`
+  - Args: `{ deviceUnicasts: List<int> }`
+  - Returns: `false`
+  - Notes: required by `ARCHITECTURE_REDESIGN.md`, but intentionally stubbed for now.
+
 - `sendUnicastGet`
-  - Dart args: `{ unicastAddress: int, proxyMac?: String }`
-  - Intended return: `bool`
+  - Args: `{ unicastAddress: int, proxyMac?: String }`
+  - Returns: `false`
+  - Notes: required by `ARCHITECTURE_REDESIGN.md`, but intentionally stubbed for now.
+
+### Dart-only methods
+None.
 
 ## Events / callbacks (Android → Dart)
 Android sends these by calling `methodChannel.invokeMethod(name, payload)`.

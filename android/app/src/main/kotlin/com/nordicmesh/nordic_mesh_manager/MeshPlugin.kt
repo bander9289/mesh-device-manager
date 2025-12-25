@@ -93,8 +93,25 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             "discoverGroupMembers" -> discoverGroupMembers(call, result)
             "getNodeSubscriptions" -> getNodeSubscriptions(call, result)
             "sendUnicastMessage" -> sendUnicastMessage(call, result)
+            "sendUnicastGet" -> sendUnicastGet(call, result)
+            "configureProxyFilter" -> configureProxyFilter(call, result)
             else -> result.notImplemented()
         }
+    }
+
+    private fun sendUnicastGet(call: MethodCall, result: MethodChannel.Result) {
+        // Intentionally stubbed.
+        // The redesign calls for GenericOnOffGet support, but this is tracked separately.
+        // Returning false avoids MissingPluginException on the Dart side and makes
+        // capability-checking possible.
+        result.success(false)
+    }
+
+    private fun configureProxyFilter(call: MethodCall, result: MethodChannel.Result) {
+        // Intentionally stubbed.
+        // Proxy filter configuration will be implemented as part of the redesign work.
+        // Returning false avoids MissingPluginException on the Dart side.
+        result.success(false)
     }
 
     private fun getNodeSubscriptions(call: MethodCall, result: MethodChannel.Result) {

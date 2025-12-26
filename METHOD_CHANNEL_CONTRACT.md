@@ -69,7 +69,7 @@ Side effects:
 ### `ensureProxyConnection`
 - Args: `Map`
   - `mac`: `String` (proxy candidate MAC)
-  - `deviceUnicasts`: `List<int>?` (**accepted by Dart, currently ignored by Android**)
+  - `deviceUnicasts`: `List<int>?` (optional; if provided and connection succeeds, Android will configure the proxy filter inclusion list)
 - Returns: `bool`
   - `true` if connected to a BLE device exposing Mesh Proxy service (0x1828)
   - `false` on failure
@@ -99,7 +99,7 @@ Side effects:
 - Args: `Map`
   - `groupAddress`: `int?` (defaults to `0xC000`)
   - `currentState`: `bool?` (defaults to `false`)
-  - `deviceUnicasts`: `List<int>?` (**accepted by Dart, currently ignored by Android**)
+  - `deviceUnicasts`: `List<int>?` (currently unused by Android; proxy filter is managed via `ensureProxyConnection` / `configureProxyFilter`)
 - Returns: `bool`
   - `true` when the discovery message is queued
 - Errors:
@@ -128,6 +128,16 @@ Side effects:
     - `subscriptions`: `List<int>` (currently always empty)
 - Errors:
   - `NODE_SUBSCRIPTIONS_ERROR`
+
+### `getMeshNodes`
+- Args: none
+- Returns: `List<Map>`
+  - Each entry (best-effort; some fields may be empty depending on SDK version):
+    - `unicastAddress`: `int`
+    - `name`: `String` (may be empty)
+    - `uuid`: `String` (may be empty)
+- Errors:
+  - `MESH_NODES_ERROR`
 
 ### `connectToDevice` (currently unused by Dart)
 - Args: `Map`
@@ -185,13 +195,13 @@ These methods may be removed from Android in the future once all callers are del
 
 - `configureProxyFilter`
   - Args: `{ deviceUnicasts: List<int> }`
-  - Returns: `false`
-  - Notes: required by `ARCHITECTURE_REDESIGN.md`, but intentionally stubbed for now.
+  - Returns: `bool`
+  - Notes: Implemented on Android to set the Proxy Configuration inclusion list and add the provided addresses.
 
 - `sendUnicastGet`
   - Args: `{ unicastAddress: int, proxyMac?: String }`
-  - Returns: `false`
-  - Notes: required by `ARCHITECTURE_REDESIGN.md`, but intentionally stubbed for now.
+  - Returns: `bool`
+  - Notes: Implemented on Android using `GenericOnOffGet`.
 
 ### Dart-only methods
 None.

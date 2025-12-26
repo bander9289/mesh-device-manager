@@ -335,6 +335,23 @@ class PlatformMeshClient implements MeshClient {
     }
   }
 
+  /// Return the raw node list from the native mesh database.
+  /// Each entry typically contains: { unicastAddress: int, name: String, uuid: String }.
+  Future<List<Map<String, dynamic>>> getMeshNodes() async {
+    if (!_available) return <Map<String, dynamic>>[];
+    try {
+      final res = await _channel.invokeMethod<List>('getMeshNodes');
+      if (res == null) return <Map<String, dynamic>>[];
+      return res
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e.map((k, v) => MapEntry(k.toString(), v))))
+          .toList();
+    } catch (e) {
+      if (kDebugMode) debugPrint('PlatformMeshClient.getMeshNodes error: $e');
+      return <Map<String, dynamic>>[];
+    }
+  }
+
   Future<Map<String, dynamic>?> discoverServices(String macAddress) async {
     if (!_available) return null;
     try {

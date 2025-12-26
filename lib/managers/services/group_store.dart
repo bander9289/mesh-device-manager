@@ -98,6 +98,7 @@ class GroupStore {
           version: existing.version,
           groupId: targetGroupId,
           lightOn: existing.lightOn,
+          meshUnicastAddress: existing.meshUnicastAddress,
         );
       }
     }

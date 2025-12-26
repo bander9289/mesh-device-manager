@@ -39,6 +39,7 @@ class BleScanningService {
     Duration? timeout,
     bool clearExisting = false,
     required VoidCallback onDevicesChanged,
+    ValueChanged<bool /* timedOut */ >? onScanStopped,
   }) {
     if (_scanSubscription != null) {
       return;
@@ -157,6 +158,7 @@ class BleScanningService {
               version: device.version,
               groupId: nextGroupId,
               lightOn: existing.lightOn,
+              meshUnicastAddress: existing.meshUnicastAddress,
             );
             changed = true;
             if (kDebugMode && verboseLogging) {
@@ -194,20 +196,25 @@ class BleScanningService {
     _scanCancelTimer?.cancel();
     _scanCancelTimer = Timer(dur, () {
       try {
-        stop(onDevicesChanged: onDevicesChanged);
+        stop(onDevicesChanged: onDevicesChanged, onScanStopped: onScanStopped, timedOut: true);
       } catch (_) {
         // best-effort
       }
     });
   }
 
-  void stop({required VoidCallback onDevicesChanged}) {
+  void stop({
+    required VoidCallback onDevicesChanged,
+    ValueChanged<bool /* timedOut */ >? onScanStopped,
+    bool timedOut = false,
+  }) {
     _scanSubscription?.cancel();
     _scanSubscription = null;
     FlutterBluePlus.stopScan();
     _scanCancelTimer?.cancel();
     _scanCancelTimer = null;
     onDevicesChanged();
+    onScanStopped?.call(timedOut);
   }
 
   void dispose() {

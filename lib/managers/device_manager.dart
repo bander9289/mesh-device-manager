@@ -93,10 +93,10 @@ class DeviceManager extends ChangeNotifier {
         .setDeviceStatusCallback((unicastAddress, state, targetState) {
       if (kDebugMode) {
         debugPrint(
-            'DeviceManager: Status from device 0x${unicastAddress.toRadixString(16)}: state=$state');
+            'DeviceManager: Status from device 0x${unicastAddress.toRadixString(16)}: state=$state target=$targetState');
       }
       // Update or create device based on unicast address
-      _updateDeviceFromStatus(unicastAddress, state);
+      _updateDeviceFromStatus(unicastAddress, state, targetState);
       _onOffStatusStream
           .add(_OnOffStatusEvent(unicastAddress: unicastAddress, state: state));
       notifyListeners();
@@ -321,6 +321,14 @@ class DeviceManager extends ChangeNotifier {
     final pm = meshClient as PlatformMeshClient;
     if (!pm.isPluginAvailable) return;
 
+    // Before reading subscriptions, try to map scanned MACs to mesh DB unicasts.
+    // This avoids relying on MAC-derived unicasts when the local mesh DB disagrees.
+    try {
+      await _refreshMeshUnicastMappingFromMeshDatabase(pm);
+    } catch (_) {
+      // best-effort
+    }
+
     final nodes = await pm.getNodeSubscriptions();
     if (nodes.isEmpty) return;
 
@@ -379,6 +387,56 @@ class DeviceManager extends ChangeNotifier {
     }
 
     notifyListeners();
+  }
+
+  Future<void> _refreshMeshUnicastMappingFromMeshDatabase(PlatformMeshClient pm) async {
+    final meshNodes = await pm.getMeshNodes();
+    if (meshNodes.isEmpty || _devices.isEmpty) return;
+
+    // Build a quick list of nodes we can match against.
+    final candidates = <({int unicast, String uuidHex, String name})>[];
+    for (final n in meshNodes) {
+      final unicast = n['unicastAddress'];
+      if (unicast is! int || unicast <= 0) continue;
+
+      final uuidRaw = n['uuid']?.toString() ?? '';
+      final uuidHex = uuidRaw.toLowerCase().replaceAll('-', '');
+      final name = n['name']?.toString() ?? '';
+      if (uuidHex.isEmpty) continue;
+      candidates.add((unicast: unicast, uuidHex: uuidHex, name: name));
+    }
+    if (candidates.isEmpty) return;
+
+    for (final d in _devices) {
+      final macHex = d.macAddress.toLowerCase().replaceAll(':', '');
+      if (macHex.length != 12) continue;
+
+      int? bestUnicast;
+      var bestScore = -1;
+      String bestName = '';
+
+      for (final c in candidates) {
+        if (!c.uuidHex.contains(macHex)) continue;
+        final score = c.uuidHex.endsWith(macHex) ? 2 : 1;
+        if (score > bestScore) {
+          bestScore = score;
+          bestUnicast = c.unicast;
+          bestName = c.name;
+        }
+      }
+
+      if (bestUnicast == null) continue;
+
+      final derived = d.derivedUnicastAddress;
+      if (d.meshUnicastAddress != bestUnicast) {
+        d.meshUnicastAddress = bestUnicast;
+        if (kDebugMode && derived != 0 && derived != bestUnicast) {
+          debugPrint(
+            'DeviceManager: unicast mismatch for ${d.macAddress} (node="$bestName"): derived=0x${derived.toRadixString(16)} meshDb=0x${bestUnicast.toRadixString(16)}',
+          );
+        }
+      }
+    }
   }
 
   Future<List<int>> _collectKnownUnicasts(PlatformMeshClient pm) async {
@@ -588,6 +646,13 @@ class DeviceManager extends ChangeNotifier {
       timeout: timeout,
       clearExisting: clearExisting,
       onDevicesChanged: notifyListeners,
+      onScanStopped: (timedOut) {
+        // When a scan stops automatically (timeout), DeviceManager.stopScanning() is not invoked.
+        // That means post-scan mesh refresh would never run for periodic/auto scans.
+        if (timedOut) {
+          _schedulePostScanMeshStateRefresh();
+        }
+      },
     );
 
     // start periodic state refresh to detect On/Off states via GATT/native
@@ -725,10 +790,64 @@ class DeviceManager extends ChangeNotifier {
           completion: _OnOffWindowCompletion.anyStatus,
           exclusive: true,
         );
-        if (quick.responded.isNotEmpty) {
-          return quick.responded.length;
+        var responded = quick.responded;
+
+        // If some devices don't report status for group messages, fall back to
+        // polling their unicast state with GenericOnOffGet.
+        final missing = targetMacs.difference(responded);
+        if (missing.isNotEmpty) {
+          final pm = meshClient as PlatformMeshClient;
+          final missingDevices = _devices
+              .where((d) => missing.contains(d.macAddress) && d.unicastAddress > 0)
+              .toList();
+          if (missingDevices.isNotEmpty) {
+            // Choose a proxy candidate from the group members.
+            final proxyMac = _devices
+                .firstWhere(
+                  (d) => targetMacs.contains(d.macAddress),
+                  orElse: () => _devices.first,
+                )
+                .macAddress;
+
+            final allUnicasts = _devices
+                .where((d) => d.unicastAddress > 0)
+                .map((d) => d.unicastAddress)
+                .toList();
+
+            try {
+              final proxyOk =
+                  await pm.ensureProxyConnection(proxyMac, deviceUnicasts: allUnicasts);
+              if (proxyOk) {
+                // Probe support (will return false on unsupported platforms).
+                final supported = await pm.sendUnicastGet(
+                  missingDevices.first.unicastAddress,
+                  proxyMac: proxyMac,
+                );
+                if (supported) {
+                  for (final d in missingDevices.skip(1)) {
+                    try {
+                      await pm.sendUnicastGet(d.unicastAddress, proxyMac: proxyMac);
+                    } catch (_) {}
+                    await Future.delayed(const Duration(milliseconds: 60));
+                  }
+
+                  final polled = await _awaitOnOffStatusWindow(
+                    targetMacs: missing,
+                    timeout: const Duration(seconds: 6),
+                    completion: _OnOffWindowCompletion.anyStatus,
+                    exclusive: true,
+                  );
+                  responded = responded.union(polled.responded);
+                }
+              }
+            } catch (_) {}
+          }
         }
-        // No quick status responses yet; still consider the trigger sent.
+
+        if (responded.isNotEmpty) {
+          return responded.length;
+        }
+        // No status responses yet; still consider the trigger sent.
         return targetMacs.length;
       }
 
@@ -814,6 +933,7 @@ class DeviceManager extends ChangeNotifier {
             version: d.version,
             groupId: groupId,
             lightOn: after[d.macAddress],
+            meshUnicastAddress: d.meshUnicastAddress,
           );
           count++;
         } else {
@@ -827,6 +947,7 @@ class DeviceManager extends ChangeNotifier {
             version: d.version,
             groupId: d.groupId,
             lightOn: after[d.macAddress] ?? d.lightOn,
+            meshUnicastAddress: d.meshUnicastAddress,
           );
         }
       }
@@ -962,6 +1083,7 @@ class DeviceManager extends ChangeNotifier {
             version: d.version,
             groupId: d.groupId,
             lightOn: after[d.macAddress],
+            meshUnicastAddress: d.meshUnicastAddress,
           );
           count++;
         } else {
@@ -974,6 +1096,7 @@ class DeviceManager extends ChangeNotifier {
             version: d.version,
             groupId: d.groupId,
             lightOn: after[d.macAddress] ?? d.lightOn,
+            meshUnicastAddress: d.meshUnicastAddress,
           );
         }
       }
@@ -1037,7 +1160,6 @@ class DeviceManager extends ChangeNotifier {
         final targetMacs = groupDevices.map((d) => d.macAddress).toSet();
 
         // Capability probe: if native doesn't support GenericOnOffGet yet, bail quickly.
-        // (Android currently stubs this and returns false.)
         bool supported = false;
         try {
           supported = await pm.sendUnicastGet(groupDevices.first.unicastAddress,
@@ -1197,6 +1319,7 @@ class DeviceManager extends ChangeNotifier {
           version: d.version,
           groupId: d.groupId,
           lightOn: states[d.macAddress] ?? d.lightOn,
+          meshUnicastAddress: d.meshUnicastAddress,
         );
       }
       notifyListeners();
@@ -1361,15 +1484,21 @@ class DeviceManager extends ChangeNotifier {
       groupId: d.groupId,
       lightOn: lightOn ?? d.lightOn,
       connectionStatus: d.connectionStatus,
+      meshUnicastAddress: d.meshUnicastAddress,
     );
     notifyListeners();
   }
 
   /// Update or create device based on GenericOnOffStatus message received from mesh
-  void _updateDeviceFromStatus(int unicastAddress, bool state) {
+  void _updateDeviceFromStatus(
+      int unicastAddress, bool state, bool? targetState) {
+    // Some platforms report both present state and a target state (transition).
+    // For UI purposes we prefer the target state when provided so OFF transitions
+    // are reflected immediately even if the final present=OFF status is delayed.
+    final effectiveState = targetState ?? state;
     if (kDebugMode) {
       debugPrint(
-          'DeviceManager: Received status from 0x${unicastAddress.toRadixString(16)}: state=$state');
+          'DeviceManager: Received status from 0x${unicastAddress.toRadixString(16)}: state=$state target=$targetState effective=$effectiveState');
     }
 
     // Find device by matching calculated unicast address
@@ -1407,8 +1536,9 @@ class DeviceManager extends ChangeNotifier {
         rssi: device.rssi,
         version: device.version,
         groupId: nextGroupId,
-        lightOn: state,
+        lightOn: effectiveState,
         connectionStatus: device.connectionStatus,
+        meshUnicastAddress: device.meshUnicastAddress,
       );
       notifyListeners();
       // Mark this device as a confirmed member of its assigned group (if assigned).

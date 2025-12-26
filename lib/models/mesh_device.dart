@@ -10,6 +10,9 @@ class MeshDevice {
   int? groupId;
   bool? lightOn;
   ConnectionStatus connectionStatus;
+  // When known, this should be treated as the source-of-truth unicast address
+  // (sourced from the mesh network DB / provisioning records).
+  int? meshUnicastAddress;
   
   MeshDevice({
     required this.macAddress,
@@ -21,15 +24,15 @@ class MeshDevice {
     this.groupId,
     this.lightOn,
     this.connectionStatus = ConnectionStatus.disconnected,
+    this.meshUnicastAddress,
   });
   
-  /// Calculate mesh unicast address from MAC address
-  /// Formula: unicast = ((mac[5] << 8) | mac[4]) & 0x7FFF
-  /// Returns 0x0001 if result is 0x0000
-  int get unicastAddress {
+  /// Best-effort derived unicast address from MAC.
+  /// This is not reliable across all devices; prefer [meshUnicastAddress] when set.
+  int get derivedUnicastAddress {
     // Parse MAC address (format: "AA:BB:CC:DD:EE:FF")
     final parts = macAddress.split(':');
-    if (parts.length != 6) return 0x0001;
+    if (parts.length != 6) return 0;
     
     try {
       // Get last 2 bytes (indices 4 and 5)
@@ -39,11 +42,20 @@ class MeshDevice {
       // Combine in big-endian order (no byte-swap): high=parts[4], low=parts[5]
       int addr = (byte4 << 8) | byte5;
       addr &= 0x7FFF; // Keep in valid unicast range 0x0001-0x7FFF
-      
-      // If result is 0, default to 0x0001
-      return addr == 0 ? 0x0001 : addr;
+
+      return addr;
     } catch (e) {
-      return 0x0001;
+      return 0;
     }
+  }
+
+  /// Mesh unicast address used for messaging/status matching.
+  /// Prefers mesh-DB-derived value; falls back to MAC-derived value.
+  int get unicastAddress {
+    final mesh = meshUnicastAddress;
+    if (mesh != null && mesh >= 0x0001 && mesh <= 0x7FFF) {
+      return mesh;
+    }
+    return derivedUnicastAddress;
   }
 }

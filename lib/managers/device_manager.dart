@@ -49,6 +49,10 @@ class DeviceManager extends ChangeNotifier {
 
   static const Duration _kTriggerStatusMonitorTimeout = Duration(seconds: 40);
   static const Duration _kTriggerQuickAckTimeout = Duration(seconds: 2);
+  // Some firmwares auto-turn OFF after a delay (e.g. 15–20s) and may not publish
+  // a status at the moment they switch. We add a delayed unicast GET to refresh
+  // state so the UI doesn't have to wait for the next scan cycle.
+  static const Duration _kAutoOffStatusPollDelay = Duration(seconds: 22);
 
   // UI-selected group id (used for post-scan mesh refresh).
   int _activeUiGroupId = 0xC000;
@@ -389,7 +393,8 @@ class DeviceManager extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> _refreshMeshUnicastMappingFromMeshDatabase(PlatformMeshClient pm) async {
+  Future<void> _refreshMeshUnicastMappingFromMeshDatabase(
+      PlatformMeshClient pm) async {
     final meshNodes = await pm.getMeshNodes();
     if (meshNodes.isEmpty || _devices.isEmpty) return;
 
@@ -798,7 +803,8 @@ class DeviceManager extends ChangeNotifier {
         if (missing.isNotEmpty) {
           final pm = meshClient as PlatformMeshClient;
           final missingDevices = _devices
-              .where((d) => missing.contains(d.macAddress) && d.unicastAddress > 0)
+              .where(
+                  (d) => missing.contains(d.macAddress) && d.unicastAddress > 0)
               .toList();
           if (missingDevices.isNotEmpty) {
             // Choose a proxy candidate from the group members.
@@ -815,8 +821,8 @@ class DeviceManager extends ChangeNotifier {
                 .toList();
 
             try {
-              final proxyOk =
-                  await pm.ensureProxyConnection(proxyMac, deviceUnicasts: allUnicasts);
+              final proxyOk = await pm.ensureProxyConnection(proxyMac,
+                  deviceUnicasts: allUnicasts);
               if (proxyOk) {
                 // Probe support (will return false on unsupported platforms).
                 final supported = await pm.sendUnicastGet(
@@ -826,7 +832,8 @@ class DeviceManager extends ChangeNotifier {
                 if (supported) {
                   for (final d in missingDevices.skip(1)) {
                     try {
-                      await pm.sendUnicastGet(d.unicastAddress, proxyMac: proxyMac);
+                      await pm.sendUnicastGet(d.unicastAddress,
+                          proxyMac: proxyMac);
                     } catch (_) {}
                     await Future.delayed(const Duration(milliseconds: 60));
                   }
@@ -1132,8 +1139,9 @@ class DeviceManager extends ChangeNotifier {
       try {
         final groupId = _activeUiGroupId;
         if (groupId == -1) return; // Unknown
-        final groupDevices =
-          _devices.where((d) => d.groupId == groupId && d.unicastAddress > 0).toList();
+        final groupDevices = _devices
+            .where((d) => d.groupId == groupId && d.unicastAddress > 0)
+            .toList();
         if (groupDevices.isEmpty) return;
 
         // Pick a proxy candidate MAC (prefer confirmed members).
@@ -1215,6 +1223,7 @@ class DeviceManager extends ChangeNotifier {
   }) async {
     StreamSubscription<_OnOffStatusEvent>? subscription;
     Timer? timer;
+    Timer? autoOffPollTimer;
 
     // Optionally cancel any existing trigger listener to avoid overlapping windows.
     if (exclusive) {
@@ -1239,6 +1248,7 @@ class DeviceManager extends ChangeNotifier {
 
     void finish() {
       if (completer.isCompleted) return;
+      autoOffPollTimer?.cancel();
       final completedAll = isDone();
       completer.complete(_OnOffWindowResult(
           responded: responded, completedAllTargets: completedAll));
@@ -1270,6 +1280,27 @@ class DeviceManager extends ChangeNotifier {
       finish();
     });
 
+    // Mid-window poll for devices that haven't reported a final OFF.
+    if (completion == _OnOffWindowCompletion.onThenOff &&
+        _kAutoOffStatusPollDelay < timeout) {
+      autoOffPollTimer = Timer(_kAutoOffStatusPollDelay, () {
+        final pending = <String>{};
+        for (final mac in targetMacs) {
+          final p = progress[mac];
+          if (p == null) continue;
+          if (!p.seenAny || (p.sawOn && !p.sawOffAfterOn)) {
+            pending.add(mac);
+          }
+        }
+        if (pending.isEmpty) return;
+        if (kDebugMode) {
+          debugPrint(
+              'DeviceManager: trigger status window poll: polling ${pending.length}/${targetMacs.length} devices for OFF state');
+        }
+        unawaited(_pollUnicastOnOffForMacs(pending));
+      });
+    }
+
     if (exclusive) {
       _activeTriggerStatusSubscription = subscription;
       _activeTriggerStatusTimer = timer;
@@ -1278,12 +1309,56 @@ class DeviceManager extends ChangeNotifier {
     final res = await completer.future;
     await subscription.cancel();
     timer.cancel();
+    autoOffPollTimer?.cancel();
 
     if (exclusive) {
       _activeTriggerStatusSubscription = null;
       _activeTriggerStatusTimer = null;
     }
     return res;
+  }
+
+  Future<void> _pollUnicastOnOffForMacs(Set<String> macs) async {
+    if (macs.isEmpty) return;
+    if (meshClient is! PlatformMeshClient) return;
+    final pm = meshClient as PlatformMeshClient;
+    if (!pm.isPluginAvailable || !(Platform.isAndroid || Platform.isIOS)) {
+      return;
+    }
+
+    final targets = _devices
+        .where((d) => macs.contains(d.macAddress) && d.unicastAddress > 0)
+        .toList();
+    if (targets.isEmpty) return;
+
+    // Pick a proxy candidate from any known device.
+    final proxyMac = targets.first.macAddress;
+    final allUnicasts = _devices
+        .where((d) => d.unicastAddress > 0)
+        .map((d) => d.unicastAddress)
+        .toList();
+
+    try {
+      final proxyOk =
+          await pm.ensureProxyConnection(proxyMac, deviceUnicasts: allUnicasts);
+      if (!proxyOk) return;
+
+      // Probe support (false on unsupported platforms).
+      final supported = await pm.sendUnicastGet(targets.first.unicastAddress,
+          proxyMac: proxyMac);
+      if (!supported) return;
+
+      for (final d in targets.skip(1)) {
+        try {
+          await pm.sendUnicastGet(d.unicastAddress, proxyMac: proxyMac);
+        } catch (_) {}
+        await Future.delayed(const Duration(milliseconds: 60));
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('DeviceManager: delayed unicast GET poll failed: $e');
+      }
+    }
   }
 
   Future<void> refreshDeviceLightStates() async {

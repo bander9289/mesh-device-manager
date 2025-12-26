@@ -310,7 +310,9 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         }
 
         // Chunk to keep proxy config messages small.
-        val chunkSize = 50
+        // NOTE: Nordic mesh 3.4.0 ProxyConfigAddAddressToFilter has a serialization bug for lists > 2,
+        // so keep this at <= 2 to ensure the proxy applies the filter updates deterministically.
+        val chunkSize = 2
         for (chunk in addresses.chunked(chunkSize)) {
             val add = ProxyConfigAddAddressToFilter(chunk)
             android.util.Log.d("MeshPlugin", "configureProxyFilter: adding ${chunk.size} addresses")

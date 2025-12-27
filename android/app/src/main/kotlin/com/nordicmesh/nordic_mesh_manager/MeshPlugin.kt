@@ -24,6 +24,8 @@ import no.nordicsemi.android.mesh.MeshStatusCallbacks
 import no.nordicsemi.android.mesh.transport.GenericOnOffSet
 import no.nordicsemi.android.mesh.transport.GenericOnOffGet
 import no.nordicsemi.android.mesh.transport.GenericOnOffStatus
+import no.nordicsemi.android.mesh.transport.GenericBatteryGet
+import no.nordicsemi.android.mesh.transport.GenericBatteryStatus
 import no.nordicsemi.android.mesh.transport.MeshMessage
 import no.nordicsemi.android.mesh.transport.ProvisionedMeshNode
 import no.nordicsemi.android.mesh.transport.ProxyConfigAddAddressToFilter
@@ -166,6 +168,7 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             "readBatteryLevel" -> readBatteryLevel(result)
             "getLightStates" -> getLightStates(call, result)
             "getBatteryLevels" -> getBatteryLevels(call, result)
+            "requestBatteryLevel" -> requestBatteryLevel(call, result)
             "subscribeToCharacteristics" -> subscribeToCharacteristics(call, result)
             "isDeviceConnected" -> isDeviceConnected(call, result)
             "disconnectDevice" -> disconnectDevice(call, result)
@@ -404,6 +407,24 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                                 "unicastAddress" to src,
                                 "state" to state,
                                 "targetState" to targetState
+                            ))
+                        }
+                    }
+                    is GenericBatteryStatus -> {
+                        val batteryLevel = meshMessage.batteryLevel
+                        val timeToDischarge = meshMessage.timeToDischarge
+                        val timeToCharge = meshMessage.timeToCharge
+                        val flags = meshMessage.flags
+                        android.util.Log.d("MeshPlugin", "GenericBatteryStatus from 0x${src.toString(16)}: level=$batteryLevel%, discharge=${timeToDischarge}min, charge=${timeToCharge}min, flags=$flags")
+                        
+                        // Notify Dart layer about battery status
+                        scope.launch(Dispatchers.Main) {
+                            methodChannel.invokeMethod("onBatteryStatus", mapOf(
+                                "unicastAddress" to src,
+                                "batteryLevel" to batteryLevel,
+                                "timeToDischarge" to timeToDischarge,
+                                "timeToCharge" to timeToCharge,
+                                "flags" to flags
                             ))
                         }
                     }
@@ -901,6 +922,41 @@ class MeshPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             } catch (e: Exception) {
                 android.util.Log.e("MeshPlugin", "sendUnicastMessage error: ${e.message}", e)
                 result.error("UNICAST_ERROR", e.message, null)
+            }
+        }
+    }
+
+    private fun requestBatteryLevel(call: MethodCall, result: MethodChannel.Result) {
+        scope.launch {
+            try {
+                val unicastAddress = call.argument<Int>("unicastAddress")
+                    ?: throw IllegalArgumentException("unicastAddress required")
+                
+                android.util.Log.d("MeshPlugin", "Sending GenericBatteryGet to 0x${unicastAddress.toString(16)}")
+                
+                if (!isConnected) {
+                    result.error("NO_PROXY", "No proxy connection available", null)
+                    return@launch
+                }
+
+                if (!meshNetworkHasPrimaryUnicast(unicastAddress)) {
+                    android.util.Log.w(
+                        "MeshPlugin",
+                        "requestBatteryLevel: unicast 0x${unicastAddress.toString(16)} not in meshNetwork.nodes, adding placeholder"
+                    )
+                    ensurePlaceholderNodeForUnicast(unicastAddress)
+                }
+                
+                selectAppKey(meshNetwork)?.let { appKey ->
+                    val message = GenericBatteryGet(appKey)
+                    meshManagerApi.createMeshPdu(unicastAddress, message)
+                    result.success(true)
+                } ?: run {
+                    result.error("NO_APP_KEY", "No app key configured", null)
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("MeshPlugin", "requestBatteryLevel error: ${e.message}", e)
+                result.error("BATTERY_REQUEST_ERROR", e.message, null)
             }
         }
     }

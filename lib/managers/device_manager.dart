@@ -24,6 +24,7 @@ class DeviceManager extends ChangeNotifier {
   Timer? _timer;
   Timer? _stateRefreshTimer;
   Timer? _periodicScanTimer;
+  Timer? _batteryRefreshTimer;
   late final BleScanningService _scanningService;
   late final GroupStore _groupStore;
   // Default to real BLE scanning on Android/iOS. Keep mock default elsewhere (desktop/tests).
@@ -104,6 +105,17 @@ class DeviceManager extends ChangeNotifier {
       _onOffStatusStream
           .add(_OnOffStatusEvent(unicastAddress: unicastAddress, state: state));
       notifyListeners();
+    });
+
+    // Set up callback to receive GenericBatteryStatus messages from devices
+    platformClient.setOnBatteryStatus(
+        (unicastAddress, batteryLevel, timeToDischarge, timeToCharge, flags) {
+      if (kDebugMode) {
+        debugPrint(
+            'DeviceManager: Battery status from device 0x${unicastAddress.toRadixString(16)}: level=$batteryLevel%, discharge=$timeToDischarge, charge=$timeToCharge, flags=$flags');
+      }
+      _handleBatteryStatus(
+          unicastAddress, batteryLevel, timeToDischarge, timeToCharge, flags);
     });
 
     if (kDebugMode) {
@@ -560,6 +572,8 @@ class DeviceManager extends ChangeNotifier {
             'DeviceManager.setMeshCredentials: mesh initialized, plugin available=$available');
       }
     }
+    // Start periodic battery polling after mesh initialization
+    startBatteryPolling();
   }
 
   void startMockScanning() {
@@ -1408,6 +1422,9 @@ class DeviceManager extends ChangeNotifier {
           groupId: d.groupId,
           lightOn: states[d.macAddress] ?? d.lightOn,
           meshUnicastAddress: d.meshUnicastAddress,
+          timeToDischarge: d.timeToDischarge,
+          timeToCharge: d.timeToCharge,
+          chargingState: d.chargingState,
         );
       }
       notifyListeners();
@@ -1627,6 +1644,9 @@ class DeviceManager extends ChangeNotifier {
         lightOn: effectiveState,
         connectionStatus: device.connectionStatus,
         meshUnicastAddress: device.meshUnicastAddress,
+        timeToDischarge: device.timeToDischarge,
+        timeToCharge: device.timeToCharge,
+        chargingState: device.chargingState,
       );
       notifyListeners();
       // Mark this device as a confirmed member of its assigned group (if assigned).
@@ -1644,6 +1664,120 @@ class DeviceManager extends ChangeNotifier {
     }
   }
 
+  void _handleBatteryStatus(int unicastAddress, int batteryLevel,
+      int? timeToDischarge, int? timeToCharge, int? flags) {
+    final deviceIndex =
+        _devices.indexWhere((d) => d.unicastAddress == unicastAddress);
+
+    if (deviceIndex >= 0) {
+      final device = _devices[deviceIndex];
+      final chargingState = _parseChargingFlags(flags);
+
+      _devices[deviceIndex] = MeshDevice(
+        macAddress: device.macAddress,
+        identifier: device.identifier,
+        hardwareId: device.hardwareId,
+        batteryPercent: batteryLevel,
+        rssi: device.rssi,
+        version: device.version,
+        groupId: device.groupId,
+        lightOn: device.lightOn,
+        connectionStatus: device.connectionStatus,
+        meshUnicastAddress: device.meshUnicastAddress,
+        timeToDischarge: timeToDischarge,
+        timeToCharge: timeToCharge,
+        chargingState: chargingState,
+      );
+
+      notifyListeners();
+
+      if (kDebugMode) {
+        debugPrint(
+            'DeviceManager: Battery update for ${device.identifier}: $batteryLevel% (discharge: ${timeToDischarge ?? "unknown"}min, charge: ${timeToCharge ?? "unknown"}min, charging: $chargingState)');
+      }
+    } else {
+      if (kDebugMode) {
+        debugPrint(
+            'DeviceManager: No device found for battery status from unicast 0x${unicastAddress.toRadixString(16)}');
+      }
+    }
+  }
+
+  ChargingState? _parseChargingFlags(int? flags) {
+    if (flags == null) return null;
+    // Flags bit 0-1: charging state (0=not charging, 1=charging, 2=discharging, 3=unknown)
+    final chargingBits = flags & 0x03;
+    switch (chargingBits) {
+      case 0:
+        return ChargingState.notCharging;
+      case 1:
+        return ChargingState.charging;
+      case 2:
+        return ChargingState.discharging;
+      case 3:
+        return ChargingState.unknown;
+      default:
+        return null;
+    }
+  }
+
+  /// Request battery levels from all devices via Bluetooth Mesh Generic Battery Server Model.
+  /// This sends a GenericBatteryGet message to each device's unicast address.
+  Future<void> requestBatteryLevels() async {
+    if (meshClient is! PlatformMeshClient) {
+      if (kDebugMode) {
+        debugPrint(
+            'DeviceManager.requestBatteryLevels: mesh client is not PlatformMeshClient');
+      }
+      return;
+    }
+
+    final platformClient = meshClient as PlatformMeshClient;
+
+    for (final device in _devices) {
+      final unicast = device.unicastAddress;
+      if (unicast >= 0x0001 && unicast <= 0x7FFF) {
+        try {
+          await platformClient.requestBatteryLevel(unicast);
+          // Stagger requests to avoid overwhelming the mesh network
+          await Future.delayed(const Duration(milliseconds: 100));
+        } catch (e) {
+          if (kDebugMode) {
+            debugPrint(
+                'DeviceManager: Failed to request battery for ${device.identifier}: $e');
+          }
+        }
+      }
+    }
+  }
+
+  /// Start periodic battery polling every 60 seconds
+  void startBatteryPolling() {
+    _batteryRefreshTimer?.cancel();
+    if (meshClient is! PlatformMeshClient) return;
+    
+    if (kDebugMode) {
+      debugPrint('DeviceManager: Starting battery polling (60s interval)');
+    }
+    
+    // Request immediately on start
+    requestBatteryLevels();
+    
+    // Then request every 60 seconds
+    _batteryRefreshTimer = Timer.periodic(const Duration(seconds: 60), (timer) {
+      requestBatteryLevels();
+    });
+  }
+
+  /// Stop periodic battery polling
+  void stopBatteryPolling() {
+    _batteryRefreshTimer?.cancel();
+    _batteryRefreshTimer = null;
+    if (kDebugMode) {
+      debugPrint('DeviceManager: Stopped battery polling');
+    }
+  }
+
   @override
   void dispose() {
     _activeTriggerStatusTimer?.cancel();
@@ -1652,6 +1786,7 @@ class DeviceManager extends ChangeNotifier {
     stopPeriodicScanCycles();
     stopScanning(schedulePostScanRefresh: false);
     stopMockScanning();
+    stopBatteryPolling();
     _scanningService.dispose();
     super.dispose();
   }

@@ -203,6 +203,20 @@ These methods may be removed from Android in the future once all callers are del
   - Returns: `bool`
   - Notes: Implemented on Android using `GenericOnOffGet`.
 
+### `requestBatteryLevel`
+- Args: `Map`
+  - `unicastAddress`: `int` (required)
+- Returns: `bool`
+  - `true` when the GenericBatteryGet message is queued for sending
+- Errors:
+  - `NO_PROXY` (no proxy connection available)
+  - `NO_APP_KEY` (no app key configured)
+  - `BATTERY_REQUEST_ERROR`
+- Notes:
+  - Sends a Bluetooth Mesh `GenericBatteryGet` message to the specified unicast address
+  - Device response will be delivered via the `onBatteryStatus` event callback
+  - If the device doesn't support the Generic Battery Server Model (0x100C), no response will be received
+
 ### Dart-only methods
 None.
 
@@ -218,12 +232,30 @@ Android sends these by calling `methodChannel.invokeMethod(name, payload)`.
   - May arrive multiple times for the same device
   - Delivered on the Android main thread (posted via `Dispatchers.Main`)
 
+### `onBatteryStatus` (implemented)
+- Payload: `Map`
+  - `unicastAddress`: `int`
+  - `batteryLevel`: `int` (0-100, battery percentage)
+  - `timeToDischarge`: `int?` (minutes until battery depleted, or 0xFFFFFF if unknown)
+  - `timeToCharge`: `int?` (minutes until fully charged, or 0xFFFFFF if unknown)
+  - `flags`: `int?` (battery status flags)
+    - Bit 0-1: Charging state (00=not charging, 01=charging, 10=discharging, 11=unknown)
+    - Bit 2: Serviceability (0=no service required, 1=service required)
+    - Bit 3: Battery presence (0=battery not present, 1=present)
+    - Bit 4-7: Reserved
+- Timing:
+  - Delivered asynchronously in response to `GenericBatteryGet` requests
+  - Only devices with Generic Battery Server Model (0x100C) will respond
+  - Delivered on the Android main thread (posted via `Dispatchers.Main`)
+- Notes:
+  - Part of Bluetooth Mesh Generic Battery Server Model implementation
+  - Values 0xFFFFFF (16777215) in time fields indicate "unknown" or "not applicable"
+
 ### Reserved events (not emitted by Android today)
 These event names are reserved for future platform work. Android does not emit them today.
-As of 2025-12-24, Dart does not rely on them for core flows.
+As of 2025-12-27, Dart does not rely on them for core flows.
 
 - `onMeshPduCreated` payload (Dart expectation): `{ macs: List<String>, groupId: int, fallback: bool }`
   - Decision: on Android, PDUs are sent directly via the mesh proxy manager, so this event is currently **unused**.
 - `onCharacteristicNotification` payload (Dart expectation): `{ mac: String, uuid: String, value: List<int> }`
-- `onBatteryLevel` payload (Dart expectation): `{ mac: String, battery: int }`
 - `onSubscriptionReady` payload (Dart expectation): `{ mac: String }`

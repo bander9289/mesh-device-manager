@@ -12,12 +12,12 @@ class PlatformMeshClient implements MeshClient {
   final MeshClient _fallback;
   bool _available = false;
   Function(int unicastAddress, bool state, bool? targetState)? _onDeviceStatus;
+  Function(int unicastAddress, int batteryLevel, int? timeToDischarge, int? timeToCharge, int? flags)? _onBatteryStatus;
   
   bool get isPluginAvailable => _available;
 
   PlatformMeshClient({MeshClient? fallback}) : _fallback = fallback ?? MockMeshClient(() => []) {
     // Listen for callbacks from native plugin.
-    // NOTE: Per METHOD_CHANNEL_CONTRACT.md, Android currently emits only `onDeviceStatus`.
     _channel.setMethodCallHandler((call) async {
       switch (call.method) {
         case 'onDeviceStatus':
@@ -36,6 +36,27 @@ class PlatformMeshClient implements MeshClient {
           } catch (e) {
             if (kDebugMode) {
               debugPrint('PlatformMeshClient: error handling onDeviceStatus: $e');
+            }
+          }
+          return;
+        case 'onBatteryStatus':
+          try {
+            final args = call.arguments as Map<dynamic, dynamic>?;
+            if (args == null) return;
+            final unicastAddress = args['unicastAddress'] as int;
+            final batteryLevel = args['batteryLevel'] as int;
+            final timeToDischarge = args['timeToDischarge'] as int?;
+            final timeToCharge = args['timeToCharge'] as int?;
+            final flags = args['flags'] as int?;
+            if (kDebugMode) {
+              debugPrint(
+                'PlatformMeshClient: battery status from 0x${unicastAddress.toRadixString(16)}: level=$batteryLevel%, discharge=$timeToDischarge, charge=$timeToCharge',
+              );
+            }
+            _onBatteryStatus?.call(unicastAddress, batteryLevel, timeToDischarge, timeToCharge, flags);
+          } catch (e) {
+            if (kDebugMode) {
+              debugPrint('PlatformMeshClient: error handling onBatteryStatus: $e');
             }
           }
           return;
@@ -144,6 +165,21 @@ class PlatformMeshClient implements MeshClient {
   
   void setDeviceStatusCallback(Function(int unicastAddress, bool state, bool? targetState) callback) {
     _onDeviceStatus = callback;
+  }
+  
+  void setOnBatteryStatus(Function(int unicastAddress, int batteryLevel, int? timeToDischarge, int? timeToCharge, int? flags) callback) {
+    _onBatteryStatus = callback;
+  }
+
+  Future<void> requestBatteryLevel(int unicastAddress) async {
+    if (!_available) return;
+    try {
+      await _channel.invokeMethod('requestBatteryLevel', {
+        'unicastAddress': unicastAddress,
+      });
+    } catch (e) {
+      if (kDebugMode) debugPrint('PlatformMeshClient.requestBatteryLevel error: $e');
+    }
   }
   
   Future<bool> discoverGroupMembers(int groupAddress, {bool currentState = false, List<int>? deviceUnicasts}) async {

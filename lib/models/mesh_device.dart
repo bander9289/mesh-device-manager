@@ -1,5 +1,12 @@
 enum ConnectionStatus { disconnected, connecting, connected, ready }
 
+enum ChargingState {
+  notCharging,
+  charging,
+  discharging,
+  unknown,
+}
+
 class MeshDevice {
   final String macAddress;
   final String identifier; // last 6 nibbles
@@ -14,6 +21,11 @@ class MeshDevice {
   // (sourced from the mesh network DB / provisioning records).
   int? meshUnicastAddress;
   
+  // Battery status fields from Mesh Generic Battery Server Model
+  int? timeToDischarge; // minutes until battery depleted
+  int? timeToCharge; // minutes until fully charged
+  ChargingState? chargingState;
+  
   MeshDevice({
     required this.macAddress,
     required this.identifier,
@@ -25,6 +37,9 @@ class MeshDevice {
     this.lightOn,
     this.connectionStatus = ConnectionStatus.disconnected,
     this.meshUnicastAddress,
+    this.timeToDischarge,
+    this.timeToCharge,
+    this.chargingState,
   });
   
   /// Best-effort derived unicast address from MAC.

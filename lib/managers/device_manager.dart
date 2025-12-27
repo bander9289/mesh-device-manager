@@ -117,13 +117,25 @@ class DeviceManager extends ChangeNotifier {
       debugPrint('DeviceManager initialized: default group ensured');
     }
 
-    // Hard-coded mesh credentials -- replace these with your network/app keys
-    // NOTE: This is intentionally hard-coded for field testing. If you need different credentials,
-    // update the values here or provide a mechanism to inject them during initialization.
-    // Replace these with your provided keys (hex string, lowercase or uppercase allowed)
+    // Mesh credentials injected at build time via --dart-define
+    // Example: flutter run --dart-define=MESH_NET_KEY=<hex> --dart-define=MESH_APP_KEY=<hex>
+    // For production builds, set these in your CI/CD environment or build scripts.
+    const netKey = String.fromEnvironment('MESH_NET_KEY', defaultValue: '');
+    const appKey = String.fromEnvironment('MESH_APP_KEY', defaultValue: '');
+    
+    if (netKey.isEmpty || appKey.isEmpty) {
+      if (kDebugMode) {
+        debugPrint(
+          '⚠️  WARNING: Mesh credentials not configured!\n'
+          'Set MESH_NET_KEY and MESH_APP_KEY via --dart-define or they will be empty.\n'
+          'Example: flutter run --dart-define=MESH_NET_KEY=<hex> --dart-define=MESH_APP_KEY=<hex>'
+        );
+      }
+    }
+    
     final creds = <String, String>{
-      'netKey': '78806728531AE9EDC4241E68749219AC',
-      'appKey': '5AC5425AA36136F2513436EA29C358D5'
+      'netKey': netKey,
+      'appKey': appKey,
     };
     setMeshCredentials(creds);
   }

@@ -120,10 +120,13 @@ lib/
    ```
 
 3. **Configure mesh credentials:**
-   Edit hardcoded mesh credentials in `lib/managers/device_manager.dart`:
-   ```dart
-   // Replace values in DeviceManager constructor: setMeshCredentials()
-   await deviceManager.setMeshCredentials({'netKey': '<your network key>', 'appKey': '<your app key>'});
+   Mesh credentials are configured at build time using `--dart-define`. See [MESH_CREDENTIALS.md](MESH_CREDENTIALS.md) for full details.
+   
+   Quick start:
+   ```bash
+   flutter run \
+     --dart-define=MESH_NET_KEY=<your_network_key> \
+     --dart-define=MESH_APP_KEY=<your_app_key>
    ```
 
 
@@ -190,28 +193,30 @@ Open `ios/Runner.xcworkspace` in Xcode to configure signing and deployment.
 
 ### Mesh Network Credentials
 
-Mesh credentials must be hardcoded in the application. Update these values in `lib/services/mesh_client.dart`:
+Mesh credentials are configured at build time using Flutter's `--dart-define` feature. This keeps secrets out of the codebase and supports different credentials per environment.
 
-```dart
-class MeshClient {
-  // Network Key (128-bit)
-  static const meshNetworkKey = [
-    0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF,
-    0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32, 0x10,
-  ];
-  
-  // App Key (128-bit)
-  static const meshAppKey = [
-    0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
-    0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00,
-  ];
-  
-  // IV Index
-  static const meshIvIndex = 0x00000000;
-}
+**For Development/Testing:**
+```bash
+flutter run \
+  --dart-define=MESH_NET_KEY=78806728531AE9EDC4241E68749219AC \
+  --dart-define=MESH_APP_KEY=5AC5425AA36136F2513436EA29C358D5
 ```
 
-⚠️ **Security Note:** Consider using code obfuscation for release builds to protect credentials.
+**For Production Builds:**
+```bash
+flutter build apk \
+  --dart-define=MESH_NET_KEY=<your_production_network_key> \
+  --dart-define=MESH_APP_KEY=<your_production_app_key>
+```
+
+📖 **Full Documentation:** See [MESH_CREDENTIALS.md](MESH_CREDENTIALS.md) for:
+- VS Code integration
+- CI/CD configuration
+- Environment variables
+- Security best practices
+- Troubleshooting
+
+⚠️ **Security Note:** Never commit credentials to version control. Use secret management for CI/CD pipelines.
 
 ### Battery Level Thresholds
 

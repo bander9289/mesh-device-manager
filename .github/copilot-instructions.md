@@ -33,4 +33,4 @@ Mobile application for managing Nordic nRF52 BLE Mesh devices with group managem
 - Verify BLE mesh operations
 - Test firmware update flows
 
-Note: The group dropdown defaults to "Default" (0xC000). An "Unknown" option is available to show devices without a group assignment. The app currently uses hardcoded mesh credentials in `DeviceManager.setMeshCredentials()` — update these values there for mesh testing.
+Note: The group dropdown defaults to "Default" (0xC000). An "Unknown" option is available to show devices without a group assignment. Mesh credentials are configured at build time using `--dart-define` (see MESH_CREDENTIALS.md for details).

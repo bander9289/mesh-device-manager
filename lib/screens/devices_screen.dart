@@ -452,13 +452,14 @@ class _DevicesScreenState extends State<DevicesScreen> {
                                     CircularProgressIndicator(strokeWidth: 2)),
                           const SizedBox(width: 8),
                           Icon(Icons.battery_std,
-                              color: device.batteryPercent == 0
-                                  ? Colors.grey
+                              color: device.batteryPercent < 0
+                                  ? Colors.grey // Unknown battery level (stubbed)
                                   : (device.batteryPercent >= 50
                                       ? Colors.green
                                       : (device.batteryPercent >= 25
                                           ? Colors.orange
                                           : Colors.red))),
+                          // Battery stubbed for future Mesh Generic Battery Service implementation
                         ]),
                         onTap: () {
                           if (_selectionMode) {
@@ -745,11 +746,13 @@ class DeviceListTile extends StatelessWidget {
         statusIcon = const Icon(Icons.sync, color: Colors.blue, size: 20);
         break;
       case ConnectionStatus.ready:
-        final batteryColor = device.batteryPercent >= 50
-            ? Colors.green
-            : device.batteryPercent >= 25
-                ? Colors.orange
-                : Colors.red;
+        final batteryColor = device.batteryPercent < 0
+            ? Colors.grey // Unknown battery level (stubbed)
+            : device.batteryPercent >= 50
+                ? Colors.green
+                : device.batteryPercent >= 25
+                    ? Colors.orange
+                    : Colors.red;
         statusIcon = Icon(Icons.battery_std, color: batteryColor);
         break;
       case ConnectionStatus.disconnected:

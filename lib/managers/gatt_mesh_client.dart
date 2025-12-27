@@ -267,17 +267,12 @@ class GattMeshClient implements MeshClient {
 
   @override
   Future<Map<String, int>> getBatteryLevels(List<String> macAddresses) async {
-    // For BLE Mesh devices, return cached battery levels from device provider
+    // Battery implementation removed - stubbed for future Mesh Generic Battery Service.
+    // Returns -1 (unknown) for all devices until mesh battery service is implemented.
     final out = <String, int>{};
-    final devices = deviceProvider();
     for (final mac in macAddresses) {
-      final matches = devices.where((d) => macEquals(d.macAddress, mac)).toList();
-      MeshDevice? match;
-      if (matches.isNotEmpty) match = matches.first;
-      out[mac] = match?.batteryPercent ?? 0;
+      out[mac] = -1; // Unknown
     }
-    
-    // Battery levels come from advertisement manufacturer data, updated during scanning
     return out;
   }
 

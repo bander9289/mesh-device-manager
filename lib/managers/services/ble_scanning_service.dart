@@ -107,16 +107,11 @@ class BleScanningService {
 
         // Extract hardwareId from manufacturerData if present
         String hw = 'unknown';
-        int battery = -1;
         if (r.advertisementData.manufacturerData.isNotEmpty) {
           final entry = r.advertisementData.manufacturerData.entries.first;
           hw = entry.value
               .map((b) => b.toRadixString(16).padLeft(2, '0'))
               .join();
-          // try to decode a battery byte if length >=1
-          if (entry.value.isNotEmpty) {
-            battery = entry.value.first;
-          }
         }
 
         final version = r.advertisementData.serviceUuids.isNotEmpty
@@ -127,7 +122,7 @@ class BleScanningService {
           macAddress: mac,
           identifier: identifier,
           hardwareId: hw,
-          batteryPercent: battery < 0 ? 0 : battery,
+          batteryPercent: -1, // -1 = unknown, stubbed for future Mesh Generic Battery Service
           rssi: r.rssi,
           version: version,
           lightOn: false,
@@ -145,15 +140,14 @@ class BleScanningService {
           final defaultGroupId = _groups.any((g) => g.id == 0xC000) ? 0xC000 : null;
           final nextGroupId = existing.groupId ?? defaultGroupId;
 
-          // update rssi and battery
+          // update rssi only (battery stubbed for future implementation)
           if (existing.rssi != device.rssi ||
-              existing.batteryPercent != device.batteryPercent ||
               nextGroupId != existing.groupId) {
             _devices[idx] = MeshDevice(
               macAddress: existing.macAddress,
               identifier: existing.identifier,
               hardwareId: device.hardwareId,
-              batteryPercent: device.batteryPercent,
+              batteryPercent: existing.batteryPercent, // Preserve existing (stubbed) value
               rssi: device.rssi,
               version: device.version,
               groupId: nextGroupId,
@@ -163,7 +157,7 @@ class BleScanningService {
             changed = true;
             if (kDebugMode && verboseLogging) {
               debugPrint(
-                'BleScanningService: updated device $mac rssi=${device.rssi} battery=${device.batteryPercent}',
+                'BleScanningService: updated device $mac rssi=${device.rssi}',
               );
             }
           }

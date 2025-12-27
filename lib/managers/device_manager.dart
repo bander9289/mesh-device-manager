@@ -1394,14 +1394,15 @@ class DeviceManager extends ChangeNotifier {
       final Map<String, bool> states = skipLightPolling
           ? <String, bool>{}
           : await meshClient.getLightStates(macs);
-      final batteryLevels = await meshClient.getBatteryLevels(macs);
+      // Battery: Removed broken manufacturer data implementation.
+      // Stubbed for future Mesh Generic Battery Service.
       for (var i = 0; i < _devices.length; i++) {
         final d = _devices[i];
         _devices[i] = MeshDevice(
           macAddress: d.macAddress,
           identifier: d.identifier,
           hardwareId: d.hardwareId,
-          batteryPercent: batteryLevels[d.macAddress] ?? d.batteryPercent,
+          batteryPercent: d.batteryPercent, // Keep existing value (default -1 = unknown)
           rssi: d.rssi,
           version: d.version,
           groupId: d.groupId,

@@ -29,7 +29,9 @@ class _DevicesScreenState extends State<DevicesScreen> {
         Permission.bluetoothConnect,
         Permission.locationWhenInUse
       ].request();
-      if (kDebugMode) debugPrint('Permission results: $statuses');
+      if (kDebugMode) {
+        debugPrint('Permission results: $statuses');
+      }
       final ok = statuses.values.every((s) => s.isGranted || s.isLimited);
       if (ok) {
         if (kDebugMode) {
@@ -219,8 +221,9 @@ class _DevicesScreenState extends State<DevicesScreen> {
                                 Future.delayed(
                                     const Duration(milliseconds: 1500), () {
                                   if (context.mounted &&
-                                      Navigator.of(context).canPop())
+                                      Navigator.of(context).canPop()) {
                                     Navigator.of(context).pop();
+                                  }
                                 });
                               } else {
                                 await showDialog<void>(
@@ -233,8 +236,9 @@ class _DevicesScreenState extends State<DevicesScreen> {
                                 Future.delayed(
                                     const Duration(milliseconds: 1200), () {
                                   if (context.mounted &&
-                                      Navigator.of(context).canPop())
+                                      Navigator.of(context).canPop()) {
                                     Navigator.of(context).pop();
+                                  }
                                 });
                               }
                               setState(() {
@@ -260,8 +264,9 @@ class _DevicesScreenState extends State<DevicesScreen> {
                                 Future.delayed(
                                     const Duration(milliseconds: 1500), () {
                                   if (context.mounted &&
-                                      Navigator.of(context).canPop())
+                                      Navigator.of(context).canPop()) {
                                     Navigator.of(context).pop();
+                                  }
                                 });
                               } else {
                                 // Show dialog in the middle for triggered count (group)
@@ -277,8 +282,9 @@ class _DevicesScreenState extends State<DevicesScreen> {
                                 Future.delayed(
                                     const Duration(milliseconds: 1200), () {
                                   if (context.mounted &&
-                                      Navigator.of(context).canPop())
+                                      Navigator.of(context).canPop()) {
                                     Navigator.of(context).pop();
+                                  }
                                 });
                               }
                             }
@@ -466,8 +472,9 @@ class _DevicesScreenState extends State<DevicesScreen> {
                             return;
                           }
                           final dm = context.read<DeviceManager>();
-                          if (dm.isScanning)
+                          if (dm.isScanning) {
                             dm.stopScanning(schedulePostScanRefresh: false);
+                          }
                           Navigator.of(context).push(MaterialPageRoute(
                               builder: (ctx) =>
                                   DeviceDetailsScreen(device: device)));

@@ -39,12 +39,22 @@ class _DeviceDetailsScreenState extends State<DeviceDetailsScreen> {
   }
 
   Future<void> _init() async {
-    // Try to find the flutterblue device by MAC from connected devices
+    // Prefer DeviceManager scan cache (device was likely selected from scan results).
     try {
+      final cached = _dm.getCachedDevice(widget.device.macAddress);
+      if (cached != null) {
+        setState(() => _bleDevice = cached);
+        return;
+      }
+
+      // Fallback: try to find the flutterblue device by MAC from connected devices
       final dynamic con = FlutterBluePlus.connectedDevices;
       List<BluetoothDevice> devicesList = [];
-      if (con is Future<List<BluetoothDevice>>) { devicesList = await con; }
-      else if (con is List<BluetoothDevice>) { devicesList = con; }
+      if (con is Future<List<BluetoothDevice>>) {
+        devicesList = await con;
+      } else if (con is List<BluetoothDevice>) {
+        devicesList = con;
+      }
       final mac = normalizeMac(widget.device.macAddress);
       BluetoothDevice? found;
       for (final d in devicesList) {
@@ -66,39 +76,65 @@ class _DeviceDetailsScreenState extends State<DeviceDetailsScreen> {
     final dm = _dm;
 
     try {
-      // If the app is already scanning, avoid starting/stopping scan ourselves to reduce noise
+      final cached = dm.getCachedDevice(mac);
+      if (cached != null) {
+        setState(() {
+          _bleDevice = cached;
+        });
+        return cached;
+      }
+
+      // If DeviceManager scanning is active, wait briefly for the cache to populate.
       if (dm.isScanning) {
-        final resList = await FlutterBluePlus.scanResults.first;
-        for (final r in resList) {
-          final rid = normalizeMac(r.device.remoteId.toString());
-          if (rid == mac) {
+        final deadline = DateTime.now().add(const Duration(seconds: 4));
+        while (DateTime.now().isBefore(deadline)) {
+          final nowCached = dm.getCachedDevice(mac);
+          if (nowCached != null) {
             setState(() {
-              _bleDevice = r.device;
+              _bleDevice = nowCached;
             });
-            return r.device;
+            return nowCached;
           }
+          await Future.delayed(const Duration(milliseconds: 150));
         }
         return null;
       }
 
-      // Otherwise, try a short dedicated scan with timeout
-      FlutterBluePlus.startScan(timeout: const Duration(seconds: 4));
-      final resList = await FlutterBluePlus.scanResults.first;
-      for (final r in resList) {
-        final rid = normalizeMac(r.device.remoteId.toString());
-        if (rid == mac) {
-          FlutterBluePlus.stopScan();
-          setState(() {
-            _bleDevice = r.device;
-          });
-          return r.device;
-        }
-      }
-      FlutterBluePlus.stopScan();
-    } catch (e) {
+      // Otherwise, request a short DeviceManager-driven scan burst so its
+      // mesh filters + cache are used (avoid direct FlutterBluePlus.scanResults.first).
+      var startedScan = false;
       try {
-        FlutterBluePlus.stopScan();
-      } catch (_) {}
+        dm.startBLEScanning(
+            timeout: const Duration(seconds: 4), clearExisting: false);
+        startedScan = true;
+      } catch (e) {
+        if (kDebugMode) debugPrint('findDevice: startBLEScanning failed: $e');
+        return null;
+      }
+
+      final deadline = DateTime.now().add(const Duration(seconds: 4));
+      while (DateTime.now().isBefore(deadline)) {
+        final nowCached = dm.getCachedDevice(mac);
+        if (nowCached != null) {
+          if (startedScan && dm.isScanning) {
+            try {
+              dm.stopScanning(schedulePostScanRefresh: false);
+            } catch (_) {}
+          }
+          setState(() {
+            _bleDevice = nowCached;
+          });
+          return nowCached;
+        }
+        await Future.delayed(const Duration(milliseconds: 150));
+      }
+
+      if (startedScan && dm.isScanning) {
+        try {
+          dm.stopScanning(schedulePostScanRefresh: false);
+        } catch (_) {}
+      }
+    } catch (e) {
       if (kDebugMode) debugPrint('findDevice scan failed: $e');
     }
 
@@ -107,10 +143,10 @@ class _DeviceDetailsScreenState extends State<DeviceDetailsScreen> {
 
   Future<void> _connect() async {
     final dm = _dm;
-    final wasScanning = dm.isScanning;
     final device = await _findDevice();
     if (device != null) {
-      if (wasScanning) dm.stopScanning(schedulePostScanRefresh: false);
+      final wasScanning = dm.isScanning;
+      if (dm.isScanning) dm.stopScanning(schedulePostScanRefresh: false);
       setState(() {
         _status = 'Connecting...';
       });
@@ -140,7 +176,7 @@ class _DeviceDetailsScreenState extends State<DeviceDetailsScreen> {
     // so DeviceDetailsScreen relies on FlutterBlue/GATT-only.
     setState(() {
       _status =
-          'Device not found (scan). Ensure scanning is running and the device is nearby.';
+          'Device not found (scan). Ensure the device is nearby and visible in the devices list.';
     });
   }
 
@@ -236,21 +272,10 @@ class _DeviceDetailsScreenState extends State<DeviceDetailsScreen> {
     final device = _bleDevice;
     final dm = context.read<DeviceManager>();
     if (device == null) {
-      // Try to toggle via meshClient plugin fallback
-      final client = dm.meshClient;
-      try {
-        await client.sendGroupMessage(0, [widget.device.macAddress]);
-        final states = await client.getLightStates([widget.device.macAddress]);
-        final on = states[widget.device.macAddress] ?? false;
-        setState(() {
-          _lightOn = on;
-        });
-        try {
-          dm.updateDeviceState(widget.device.macAddress, lightOn: on);
-        } catch (_) {}
-      } catch (e) {
-        if (kDebugMode) debugPrint('Native toggle attempt failed: $e');
-      }
+      if (!mounted) return;
+      setState(() {
+        _status = 'Not connected. Connect via BLE before toggling.';
+      });
       return;
     }
 
@@ -267,7 +292,9 @@ class _DeviceDetailsScreenState extends State<DeviceDetailsScreen> {
       if (candidate != null) break;
     }
     if (candidate == null) {
-      if (kDebugMode) debugPrint('No candidate characteristic found for toggle');
+      if (kDebugMode) {
+        debugPrint('No candidate characteristic found for toggle');
+      }
       return;
     }
     try {
@@ -296,7 +323,8 @@ class _DeviceDetailsScreenState extends State<DeviceDetailsScreen> {
   }
 
   Future<void> _subscribeToNotifies() async {
-    final device = _bleDevice; if (device == null) return;
+    final device = _bleDevice;
+    if (device == null) return;
     final dm = context.read<DeviceManager>();
     for (final s in _services) {
       for (final c in s.characteristics) {
@@ -304,18 +332,26 @@ class _DeviceDetailsScreenState extends State<DeviceDetailsScreen> {
           try {
             await c.setNotifyValue(true);
             c.lastValueStream.listen((val) {
-              if (kDebugMode) debugPrint('DeviceDetails: notify ${c.uuid} -> $val');
+              if (kDebugMode) {
+                debugPrint('DeviceDetails: notify ${c.uuid} -> $val');
+              }
               if (!mounted) return;
               // update battery if this is battery char
-              if (c.uuid.toString().toLowerCase().contains('00002a19') && val.isNotEmpty) {
+              if (c.uuid.toString().toLowerCase().contains('00002a19') &&
+                  val.isNotEmpty) {
                 final percent = val.first & 0xff;
                 setState(() => _battery = percent);
-                try { dm.updateDeviceState(widget.device.macAddress, batteryPercent: percent); } catch (_) {}
+                try {
+                  dm.updateDeviceState(widget.device.macAddress,
+                      batteryPercent: percent);
+                } catch (_) {}
               }
               if (_candidateUuids.contains(c.uuid.toString().toLowerCase())) {
                 final on = val.isNotEmpty && val.first == 0x01;
                 setState(() => _lightOn = on);
-                try { dm.updateDeviceState(widget.device.macAddress, lightOn: on); } catch (_) {}
+                try {
+                  dm.updateDeviceState(widget.device.macAddress, lightOn: on);
+                } catch (_) {}
               }
             });
           } catch (_) {}
@@ -337,38 +373,63 @@ class _DeviceDetailsScreenState extends State<DeviceDetailsScreen> {
     final dm = context.read<DeviceManager>();
     return ExpansionTile(
       title: Text('Service: ${s.uuid}'),
-      children: chars.map((c) => ListTile(
-        title: Text('Char: ${c.uuid}'),
-        subtitle: Text('properties: r=${c.properties.read} w=${c.properties.write} nr=${c.properties.notify}'),
-        trailing: Row(mainAxisSize: MainAxisSize.min, children: [
-          if (c.properties.read) IconButton(icon: const Icon(Icons.read_more), onPressed: () async {
-            try {
-              final val = await c.read();
-              if (kDebugMode) debugPrint('Read ${c.uuid} -> $val');
-              if (c.uuid.toString().toLowerCase().contains('00002a19') && val.isNotEmpty) {
-                final percent = val.first & 0xff;
-                setState(() => _battery = percent);
-                try { dm.updateDeviceState(widget.device.macAddress, batteryPercent: percent); } catch (_) {}
-              }
-            } catch (_) {}
-          }),
-          if (c.properties.write || c.properties.writeWithoutResponse) IconButton(icon: const Icon(Icons.power_settings_new), onPressed: () async {
-            try {
-              final cur = await c.read();
-              final isOn = cur.isNotEmpty && cur.first == 0x01;
-              final newVal = isOn ? [0x00] : [0x01];
-              await c.write(newVal, withoutResponse: !c.properties.write);
-              await Future.delayed(const Duration(milliseconds: 150));
-              final check = await c.read();
-              if (_candidateUuids.contains(c.uuid.toString().toLowerCase())) {
-                final on = check.isNotEmpty && check.first == 0x01;
-                setState(() => _lightOn = on);
-                try { dm.updateDeviceState(widget.device.macAddress, lightOn: on); } catch (_) {}
-              }
-            } catch (_) {}
-          }),
-        ]),
-      )).toList(),
+      children: chars
+          .map((c) => ListTile(
+                title: Text('Char: ${c.uuid}'),
+                subtitle: Text(
+                    'properties: r=${c.properties.read} w=${c.properties.write} nr=${c.properties.notify}'),
+                trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                  if (c.properties.read)
+                    IconButton(
+                        icon: const Icon(Icons.read_more),
+                        onPressed: () async {
+                          try {
+                            final val = await c.read();
+                            if (kDebugMode) {
+                              debugPrint('Read ${c.uuid} -> $val');
+                            }
+                            if (c.uuid
+                                    .toString()
+                                    .toLowerCase()
+                                    .contains('00002a19') &&
+                                val.isNotEmpty) {
+                              final percent = val.first & 0xff;
+                              setState(() => _battery = percent);
+                              try {
+                                dm.updateDeviceState(widget.device.macAddress,
+                                    batteryPercent: percent);
+                              } catch (_) {}
+                            }
+                          } catch (_) {}
+                        }),
+                  if (c.properties.write || c.properties.writeWithoutResponse)
+                    IconButton(
+                        icon: const Icon(Icons.power_settings_new),
+                        onPressed: () async {
+                          try {
+                            final cur = await c.read();
+                            final isOn = cur.isNotEmpty && cur.first == 0x01;
+                            final newVal = isOn ? [0x00] : [0x01];
+                            await c.write(newVal,
+                                withoutResponse: !c.properties.write);
+                            await Future.delayed(
+                                const Duration(milliseconds: 150));
+                            final check = await c.read();
+                            if (_candidateUuids
+                                .contains(c.uuid.toString().toLowerCase())) {
+                              final on =
+                                  check.isNotEmpty && check.first == 0x01;
+                              setState(() => _lightOn = on);
+                              try {
+                                dm.updateDeviceState(widget.device.macAddress,
+                                    lightOn: on);
+                              } catch (_) {}
+                            }
+                          } catch (_) {}
+                        }),
+                ]),
+              ))
+          .toList(),
     );
   }
 
@@ -380,37 +441,61 @@ class _DeviceDetailsScreenState extends State<DeviceDetailsScreen> {
       body: Padding(
         padding: const EdgeInsets.all(12.0),
         child: SingleChildScrollView(
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          child:
+              Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Text('MAC: ${d.macAddress}'),
             const SizedBox(height: 8),
             Text('HW: ${d.hardwareId}'),
             const SizedBox(height: 8),
-            Row(children: [Text('Version: ${d.version}'), const SizedBox(width: 16), Text('RSSI: ${d.rssi}dBm')]),
+            Row(children: [
+              Text('Version: ${d.version}'),
+              const SizedBox(width: 16),
+              Text('RSSI: ${d.rssi}dBm')
+            ]),
             const SizedBox(height: 8),
             Text('Status: $_status'),
             const SizedBox(height: 8),
-              Text('Proxy: ${_supportsProxy ? 'Yes' : 'No'} • Battery Service: ${_supportsBattery ? 'Yes' : 'No'}'),
-              const Padding(
-                padding: EdgeInsets.only(bottom: 8),
-                child: Text('Guidance: Connect then Discover services. Look for "Battery (0x180F)", "SMP (8D53...)" or "Proxy (0x1828)". Use Toggle/Subscribe for Vendor OnOff chars.'),
-              ),
+            Text(
+                'Proxy: ${_supportsProxy ? 'Yes' : 'No'} • Battery Service: ${_supportsBattery ? 'Yes' : 'No'}'),
+            const Padding(
+              padding: EdgeInsets.only(bottom: 8),
+              child: Text(
+                  'Guidance: Connect then Discover services. Look for "Battery (0x180F)", "SMP (8D53...)" or "Proxy (0x1828)". Use Toggle/Subscribe for Vendor OnOff chars.'),
+            ),
             const SizedBox(height: 8),
             Row(children: [
               const Text('Battery: '),
               Text(_battery >= 0 ? '$_battery%' : 'Unknown'),
               const SizedBox(width: 16),
-              if (_lightOn) const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+              if (_lightOn)
+                const SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2)),
             ]),
             const SizedBox(height: 8),
             Wrap(spacing: 8, runSpacing: 8, children: [
-              ElevatedButton(onPressed: _connected ? _disconnect : _connect, child: Text(_connected ? 'Disconnect' : 'Connect')),
-              ElevatedButton(onPressed: _connected ? _discover : null, child: const Text('Discover')),
-              ElevatedButton(onPressed: _connected ? _readBattery : null, child: const Text('Read Battery Now')),
-              ElevatedButton(onPressed: _connected ? _toggleCandidate : null, child: const Text('Toggle Candidate')),
-              ElevatedButton(onPressed: _connected ? _subscribeToNotifies : null, child: const Text('Subscribe')),            
+              ElevatedButton(
+                  onPressed: _connected ? _disconnect : _connect,
+                  child: Text(_connected ? 'Disconnect' : 'Connect')),
+              ElevatedButton(
+                  onPressed: _connected ? _discover : null,
+                  child: const Text('Discover')),
+              ElevatedButton(
+                  onPressed: _connected ? _readBattery : null,
+                  child: const Text('Read Battery Now')),
+              ElevatedButton(
+                  onPressed: _connected ? _toggleCandidate : null,
+                  child: const Text('Toggle Candidate')),
+              ElevatedButton(
+                  onPressed: _connected ? _subscribeToNotifies : null,
+                  child: const Text('Subscribe')),
             ]),
             const SizedBox(height: 16),
-                  if (_services.isEmpty) const Text('No services discovered yet') else Column(children: _services.map((s) => _serviceTile(s)).toList()),
+            if (_services.isEmpty)
+              const Text('No services discovered yet')
+            else
+              Column(children: _services.map((s) => _serviceTile(s)).toList()),
           ]),
         ),
       ),

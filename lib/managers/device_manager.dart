@@ -490,6 +490,46 @@ class DeviceManager extends ChangeNotifier {
     return {...fromScan, ...fromDb}.toList();
   }
 
+  /// Request battery levels for devices discovered in a specific group.
+  /// This is called immediately after group discovery to avoid the 60s polling delay.
+  Future<void> _requestBatteryForDiscoveredDevices(int groupId) async {
+    if (meshClient is! PlatformMeshClient) return;
+    final pm = meshClient as PlatformMeshClient;
+
+    // Get confirmed members for this group (devices that responded to discovery)
+    final confirmed = _confirmedGroupMembers[groupId];
+    if (confirmed == null || confirmed.isEmpty) return;
+
+    // Filter to devices with valid unicast addresses
+    final confirmedDevices = _devices
+        .where((d) =>
+            confirmed.contains(d.macAddress) &&
+            d.unicastAddress >= 0x0001 &&
+            d.unicastAddress <= 0x7FFF)
+        .toList();
+
+    if (confirmedDevices.isEmpty) return;
+
+    if (kDebugMode) {
+      debugPrint(
+          'DeviceManager: Requesting battery levels for ${confirmedDevices.length} discovered devices in group 0x${groupId.toRadixString(16)}');
+    }
+
+    // Request battery level for each confirmed device with staggered delay
+    for (final device in confirmedDevices) {
+      try {
+        await pm.requestBatteryLevel(device.unicastAddress);
+        // Stagger requests to avoid mesh congestion
+        await Future.delayed(const Duration(milliseconds: 100));
+      } catch (e) {
+        if (kDebugMode) {
+          debugPrint(
+              'DeviceManager: Failed to request battery for ${device.identifier} during discovery: $e');
+        }
+      }
+    }
+  }
+
   Future<bool> _waitForFirstMeshDevice({required DateTime deadline}) async {
     // Important: FlutterBluePlus scanning stops automatically after the timeout.
     // Keep scanning in short bursts until we see at least one device or budget expires.
@@ -551,6 +591,9 @@ class DeviceManager extends ChangeNotifier {
       await pm.discoverGroupMembers(groupId, deviceUnicasts: allUnicasts);
       // Wait for status callbacks to arrive.
       await Future.delayed(window);
+      
+      // Request battery levels for discovered devices immediately after group discovery
+      await _requestBatteryForDiscoveredDevices(groupId);
     } catch (_) {
       // best-effort
     } finally {

@@ -4,8 +4,8 @@ import 'package:file_picker/file_picker.dart';
 import '../managers/device_manager.dart';
 import '../managers/firmware_manager.dart';
 import '../managers/gatt_mesh_client.dart';
+import '../managers/update_queue_manager.dart';
 import '../models/mesh_device.dart';
-import '../models/firmware_file.dart';
 import '../models/update_progress.dart';
 import '../widgets/firmware_list_section.dart';
 import '../widgets/update_controls_section.dart';
@@ -24,6 +24,7 @@ class _UpdatesScreenState extends State<UpdatesScreen> {
   final Map<String, UpdateProgress> _updateProgress = {};
   final Map<String, String> _deviceErrors = {};
   bool _isUpdating = false;
+  UpdateQueueManager? _queueManager;
 
   @override
   void initState() {
@@ -32,13 +33,36 @@ class _UpdatesScreenState extends State<UpdatesScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final firmwareManager = context.read<FirmwareManager>();
       firmwareManager.addListener(_updateDeviceSelection);
+      
+      // Initialize queue manager
+      final deviceManager = context.read<DeviceManager>();
+      final meshClient = deviceManager.meshClient;
+      if (meshClient is GattMeshClient) {
+        _queueManager = UpdateQueueManager(
+          smpClient: meshClient.smpClient,
+          maxConcurrent: 10,
+        );
+        _queueManager!.addListener(_onQueueUpdate);
+      }
     });
   }
 
   @override
   void dispose() {
     context.read<FirmwareManager>().removeListener(_updateDeviceSelection);
+    _queueManager?.removeListener(_onQueueUpdate);
+    _queueManager?.dispose();
     super.dispose();
+  }
+
+  void _onQueueUpdate() {
+    if (mounted && _queueManager != null) {
+      setState(() {
+        // Sync queue manager's progress to local state
+        _updateProgress.clear();
+        _updateProgress.addAll(_queueManager!.allProgress);
+      });
+    }
   }
 
   void _updateDeviceSelection() {
@@ -174,6 +198,16 @@ class _UpdatesScreenState extends State<UpdatesScreen> {
   }
 
   Future<void> _updateSelected() async {
+    if (_queueManager == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Firmware updates not available'),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
+
     final selectedDevices = _getSelectedDevices();
     if (selectedDevices.isEmpty) return;
 
@@ -186,41 +220,21 @@ class _UpdatesScreenState extends State<UpdatesScreen> {
       _deviceErrors.clear();
     });
 
-    // Process updates sequentially
-    for (final device in selectedDevices) {
-      final firmwareManager = context.read<FirmwareManager>();
-      final firmware = firmwareManager.getFirmwareForDevice(device);
-      if (firmware == null) continue;
-
-      try {
-        await _updateDevice(device, firmware);
-      } catch (e) {
-        // Error handling - update device card with error
-        setState(() {
-          _deviceErrors[device.macAddress] = e.toString();
-          _updateProgress[device.macAddress] = UpdateProgress(
-            deviceMac: device.macAddress,
-            bytesTransferred: 0,
-            totalBytes: firmware.data.length,
-            stage: UpdateStage.failed,
-            errorMessage: e.toString(),
-            completedAt: DateTime.now(),
-          );
-        });
-      }
-    }
+    // Use UpdateQueueManager for automatic retry
+    final firmwareManager = context.read<FirmwareManager>();
+    await _queueManager!.startUpdates(selectedDevices, firmwareManager);
 
     setState(() => _isUpdating = false);
 
     // Show completion message
     if (mounted) {
-      final successCount = selectedDevices.length - _deviceErrors.length;
+      final summary = _queueManager!.summary;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            'Updates complete: $successCount/${selectedDevices.length} successful',
+            'Updates complete: ${summary.completed}/${summary.total} successful',
           ),
-          backgroundColor: _deviceErrors.isEmpty ? Colors.green : Colors.orange,
+          backgroundColor: summary.failed == 0 ? Colors.green : Colors.orange,
         ),
       );
     }
@@ -234,45 +248,12 @@ class _UpdatesScreenState extends State<UpdatesScreen> {
         .toList();
   }
 
-  Future<void> _updateDevice(MeshDevice device, FirmwareFile firmware) async {
-    // Initialize progress tracking
-    setState(() {
-      _updateProgress[device.macAddress] = UpdateProgress(
-        deviceMac: device.macAddress,
-        bytesTransferred: 0,
-        totalBytes: firmware.data.length,
-        stage: UpdateStage.connecting,
-        startedAt: DateTime.now(),
-      );
-    });
-
-    // Get mesh client and call updateFirmware
-    final deviceManager = context.read<DeviceManager>();
-    final meshClient = deviceManager.meshClient;
-
-    // Check if meshClient supports firmware updates
-    if (meshClient is! GattMeshClient) {
-      throw Exception('Firmware updates not supported by current mesh client');
-    }
-
-    // Call updateFirmware with progress callbacks
-    await meshClient.updateFirmware(
-      device: device,
-      firmwareData: firmware.data,
-      onProgress: (progress) {
-        if (mounted) {
-          setState(() {
-            _updateProgress[device.macAddress] = progress;
-          });
-        }
-      },
-    );
-
-    // Wait a bit for device to reboot and re-advertise
-    await Future.delayed(const Duration(seconds: 2));
-
-    // Note: Device version will be updated automatically when it re-advertises
-    // The scanning logic in device_manager will pick up the new version
+  void _retryDevice(MeshDevice device) {
+    if (_queueManager == null) return;
+    
+    final firmwareManager = context.read<FirmwareManager>();
+    setState(() => _isUpdating = true);
+    _queueManager!.startUpdates([device], firmwareManager);
   }
 
   Future<bool> _showUpdateConfirmation(List<MeshDevice> devices) async {
@@ -307,6 +288,16 @@ class _UpdatesScreenState extends State<UpdatesScreen> {
   }
 
   Future<void> _reflashDevice(MeshDevice device) async {
+    if (_queueManager == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Firmware updates not available'),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
+
     final firmwareManager = context.read<FirmwareManager>();
     final firmware = firmwareManager.getFirmwareForDevice(device);
     if (firmware == null) return;
@@ -317,34 +308,29 @@ class _UpdatesScreenState extends State<UpdatesScreen> {
 
     setState(() => _isUpdating = true);
 
-    try {
-      // Same as update but force regardless of version
-      await _updateDevice(device, firmware);
+    // Use UpdateQueueManager for reflash
+    await _queueManager!.startUpdates([device], firmwareManager);
 
-      if (mounted) {
+    if (mounted) {
+      final progress = _updateProgress[device.macAddress];
+      if (progress != null && progress.stage == UpdateStage.complete) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('Re-flash complete for ${device.macAddress}'),
             backgroundColor: Colors.green,
           ),
         );
-      }
-    } catch (e) {
-      setState(() {
-        _deviceErrors[device.macAddress] = e.toString();
-      });
-
-      if (mounted) {
+      } else if (progress != null && progress.stage == UpdateStage.failed) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Re-flash failed: ${e.toString()}'),
+            content: Text('Re-flash failed: ${progress.errorMessage}'),
             backgroundColor: Colors.red,
           ),
         );
       }
-    } finally {
-      setState(() => _isUpdating = false);
     }
+
+    setState(() => _isUpdating = false);
   }
 
   Future<bool> _showReflashConfirmation(MeshDevice device) async {
@@ -517,6 +503,9 @@ class _UpdatesScreenState extends State<UpdatesScreen> {
             });
           },
           onReflash: canReflash ? () => _reflashDevice(device) : null,
+          onRetry: (progress != null && progress.stage == UpdateStage.failed)
+              ? () => _retryDevice(device)
+              : null,
         );
       },
     );

@@ -1,3 +1,5 @@
+import 'update_error.dart';
+
 /// Stages of firmware update process with progress percentage ranges.
 enum UpdateStage {
   idle, // Not started
@@ -15,7 +17,8 @@ class UpdateProgress {
   final int bytesTransferred;
   final int totalBytes;
   final UpdateStage stage;
-  final String? errorMessage;
+  final String? errorMessage; // Deprecated: use error instead
+  final UpdateError? error;
   final DateTime? startedAt;
   final DateTime? completedAt;
 
@@ -25,6 +28,7 @@ class UpdateProgress {
     required this.totalBytes,
     required this.stage,
     this.errorMessage,
+    this.error,
     this.startedAt,
     this.completedAt,
   });
@@ -95,6 +99,10 @@ class UpdateProgress {
       case UpdateStage.complete:
         return 'Update complete';
       case UpdateStage.failed:
+        // Use UpdateError if available, otherwise fall back to errorMessage
+        if (error != null) {
+          return error!.getUserMessage();
+        }
         return errorMessage ?? 'Update failed';
     }
   }
@@ -105,6 +113,7 @@ class UpdateProgress {
     int? totalBytes,
     UpdateStage? stage,
     String? errorMessage,
+    UpdateError? error,
     DateTime? startedAt,
     DateTime? completedAt,
   }) {
@@ -114,6 +123,7 @@ class UpdateProgress {
       totalBytes: totalBytes ?? this.totalBytes,
       stage: stage ?? this.stage,
       errorMessage: errorMessage ?? this.errorMessage,
+      error: error ?? this.error,
       startedAt: startedAt ?? this.startedAt,
       completedAt: completedAt ?? this.completedAt,
     );

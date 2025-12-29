@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import '../models/update_progress.dart';
+import '../models/update_error.dart';
 import 'smp_client.dart';
 
 /// Platform channel implementation of SMPClient
@@ -76,13 +77,16 @@ class PlatformSMPClient implements SMPClient {
         
       case 'error':
         final message = event['message'] as String? ?? 'Unknown error';
+        final error = UpdateError.fromMessage(message);
+        
         if (_currentDeviceMac != null) {
           final progress = UpdateProgress(
             deviceMac: _currentDeviceMac!,
             bytesTransferred: 0,
             totalBytes: 0,
             stage: UpdateStage.failed,
-            errorMessage: message,
+            error: error,
+            errorMessage: message, // Keep for backwards compatibility
             startedAt: _uploadStartTime,
             completedAt: DateTime.now(),
           );
@@ -96,13 +100,19 @@ class PlatformSMPClient implements SMPClient {
         break;
         
       case 'cancelled':
+        final error = UpdateError(
+          type: UpdateErrorType.cancelled,
+          message: 'Upload cancelled',
+        );
+        
         if (_currentDeviceMac != null) {
           final progress = UpdateProgress(
             deviceMac: _currentDeviceMac!,
             bytesTransferred: 0,
             totalBytes: 0,
             stage: UpdateStage.failed,
-            errorMessage: 'Upload cancelled',
+            error: error,
+            errorMessage: 'Upload cancelled', // Keep for backwards compatibility
             startedAt: _uploadStartTime,
             completedAt: DateTime.now(),
           );
@@ -227,13 +237,16 @@ class PlatformSMPClient implements SMPClient {
         debugPrint('PlatformSMPClient: upload failed: ${e.message}');
       }
       
+      final error = UpdateError.fromMessage(e.message ?? 'Upload failed');
+      
       if (_currentDeviceMac != null) {
         final progress = UpdateProgress(
           deviceMac: _currentDeviceMac!,
           bytesTransferred: 0,
           totalBytes: data.length,
           stage: UpdateStage.failed,
-          errorMessage: e.message ?? 'Upload failed',
+          error: error,
+          errorMessage: e.message ?? 'Upload failed', // Keep for backwards compatibility
           startedAt: _uploadStartTime,
           completedAt: DateTime.now(),
         );
@@ -250,13 +263,16 @@ class PlatformSMPClient implements SMPClient {
         debugPrint('PlatformSMPClient: unexpected upload error: $e');
       }
       
+      final error = UpdateError.unknown(e.toString());
+      
       if (_currentDeviceMac != null) {
         final progress = UpdateProgress(
           deviceMac: _currentDeviceMac!,
           bytesTransferred: 0,
           totalBytes: data.length,
           stage: UpdateStage.failed,
-          errorMessage: e.toString(),
+          error: error,
+          errorMessage: e.toString(), // Keep for backwards compatibility
           startedAt: _uploadStartTime,
           completedAt: DateTime.now(),
         );

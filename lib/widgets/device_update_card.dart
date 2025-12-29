@@ -25,6 +25,7 @@ class DeviceUpdateCard extends StatelessWidget {
   final UpdateProgress? progress;
   final ValueChanged<bool>? onSelectionChanged;
   final VoidCallback? onReflash;
+  final VoidCallback? onRetry;
 
   const DeviceUpdateCard({
     super.key,
@@ -35,6 +36,7 @@ class DeviceUpdateCard extends StatelessWidget {
     this.progress,
     this.onSelectionChanged,
     this.onReflash,
+    this.onRetry,
   });
 
   UpdateStatus _getUpdateStatus() {
@@ -186,22 +188,80 @@ class DeviceUpdateCard extends StatelessWidget {
                 ],
               ),
             ] else if (progress != null && progress!.stage == UpdateStage.failed) ...[
+              // Error display with user-friendly message
               Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Icon(Icons.error, color: Colors.red, size: 16),
                   const SizedBox(width: 4),
                   Expanded(
-                    child: Text(
-                      progress!.errorMessage ?? 'Update failed',
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: Colors.red,
-                      ),
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          progress!.error?.getUserMessage() ?? 
+                          _getUserFriendlyError(progress!.errorMessage),
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: Colors.red,
+                          ),
+                        ),
+                        // Technical details expansion if available
+                        if (progress!.error?.technicalDetails != null &&
+                            progress!.error!.technicalDetails!.isNotEmpty) ...[
+                          const SizedBox(height: 4),
+                          Theme(
+                            data: theme.copyWith(
+                              dividerColor: Colors.transparent,
+                            ),
+                            child: ExpansionTile(
+                              tilePadding: EdgeInsets.zero,
+                              childrenPadding: const EdgeInsets.only(
+                                left: 12,
+                                top: 4,
+                                bottom: 4,
+                              ),
+                              title: Text(
+                                'Technical Details',
+                                style: theme.textTheme.labelSmall?.copyWith(
+                                  color: colorScheme.onSurfaceVariant,
+                                ),
+                              ),
+                              children: [
+                                Container(
+                                  padding: const EdgeInsets.all(8),
+                                  decoration: BoxDecoration(
+                                    color: colorScheme.surfaceContainerHighest,
+                                    borderRadius: BorderRadius.circular(4),
+                                  ),
+                                  child: SelectableText(
+                                    progress!.error!.technicalDetails!,
+                                    style: theme.textTheme.bodySmall?.copyWith(
+                                      fontFamily: 'monospace',
+                                      color: colorScheme.onSurfaceVariant,
+                                      fontSize: 11,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ],
                     ),
                   ),
                 ],
               ),
+              if (onRetry != null) ...[
+                const SizedBox(height: 8),
+                TextButton.icon(
+                  onPressed: onRetry,
+                  icon: const Icon(Icons.refresh, size: 16),
+                  label: const Text('Retry'),
+                  style: TextButton.styleFrom(
+                    foregroundColor: Colors.orange,
+                  ),
+                ),
+              ],
             ] else ...[
               Text(
                 statusText,
@@ -229,5 +289,29 @@ class DeviceUpdateCard extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  String _getUserFriendlyError(String? errorMessage) {
+    if (errorMessage == null) return 'Update failed';
+    
+    // Map platform error codes to user-friendly messages
+    if (errorMessage.contains('CONNECTION_FAILED')) {
+      return "Can't connect to device. Make sure it's nearby and powered on.";
+    }
+    if (errorMessage.contains('UPLOAD_FAILED')) {
+      return "Upload interrupted. Check Bluetooth connection.";
+    }
+    if (errorMessage.contains('VERIFICATION_FAILED')) {
+      return "Firmware verification failed. Try re-downloading the file.";
+    }
+    if (errorMessage.contains('RESET_FAILED')) {
+      return "Device reset failed. Try power cycling the device.";
+    }
+    if (errorMessage.contains('timeout') || errorMessage.contains('TIMEOUT')) {
+      return "Update timed out. Device may be out of range.";
+    }
+    
+    // Fallback to raw message
+    return errorMessage;
   }
 }

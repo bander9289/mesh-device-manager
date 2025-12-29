@@ -6,6 +6,7 @@ import 'smp_client.dart';
 import 'platform_smp_client.dart';
 import '../models/mesh_device.dart';
 import '../models/update_progress.dart';
+import '../models/update_error.dart';
 import '../utils/mac_address.dart';
 
 /// Basic GATT-based MeshClient fallback. It writes to known candidate characteristics
@@ -31,6 +32,9 @@ class GattMeshClient implements MeshClient {
   GattMeshClient({required this.deviceProvider, this.fallback, this.isAppScanning}) {
     _smpClient = PlatformSMPClient();
   }
+
+  /// Get the SMP client for firmware update operations
+  SMPClient get smpClient => _smpClient;
 
   @override
   Future<void> initialize(Map<String, String>? credentials) async {
@@ -441,7 +445,10 @@ class GattMeshClient implements MeshClient {
       
       final connected = await _smpClient.connect(macAddress);
       if (!connected) {
-        throw Exception('Failed to establish SMP connection to $macAddress');
+        final error = UpdateError.connectionFailed(
+          'Failed to establish SMP connection to $macAddress',
+        );
+        throw error;
       }
       
       if (kDebugMode) {
@@ -460,7 +467,10 @@ class GattMeshClient implements MeshClient {
         
         // If upload failed, throw exception
         if (progress.stage == UpdateStage.failed) {
-          throw Exception(progress.errorMessage ?? 'Firmware upload failed');
+          final error = progress.error ?? UpdateError.uploadFailed(
+            progress.errorMessage ?? 'Firmware upload failed',
+          );
+          throw error;
         }
         
         // If upload completed successfully, break the loop
@@ -512,13 +522,17 @@ class GattMeshClient implements MeshClient {
         debugPrint('GattMeshClient.updateFirmware: error during update: $e');
       }
       
+      // Convert to UpdateError if not already
+      final error = e is UpdateError ? e : UpdateError.unknown(e.toString());
+      
       // Notify caller of failure
       onProgress(UpdateProgress(
         deviceMac: macAddress,
         bytesTransferred: 0,
         totalBytes: firmwareData.length,
         stage: UpdateStage.failed,
-        errorMessage: e.toString(),
+        error: error,
+        errorMessage: e.toString(), // Keep for backward compatibility
         completedAt: DateTime.now(),
       ));
       

@@ -16,7 +16,7 @@ import io.runtime.mcumgr.exception.McuMgrException
 import io.runtime.mcumgr.managers.DefaultManager
 import io.runtime.mcumgr.managers.ImageManager
 import io.runtime.mcumgr.response.img.McuMgrImageStateResponse
-import io.runtime.mcumgr.response.dflt.McuMgrResetResponse
+import io.runtime.mcumgr.response.dflt.McuMgrOsResponse
 import io.runtime.mcumgr.transfer.TransferController
 import io.runtime.mcumgr.transfer.UploadCallback
 import kotlinx.coroutines.CoroutineScope
@@ -104,8 +104,8 @@ class SMPPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             }
             "getMTU" -> {
                 Log.d(TAG, "getMTU called")
-                val mtu = transport?.mtu ?: 23
-                result.success(mtu)
+                // MTU is not directly accessible in v2.x API
+                result.success(247)  // Default MTU for Nordic BLE (256 - 9 byte ATT header)
             }
             "resetDevice" -> {
                 val mac = call.argument<String>("mac")
@@ -348,8 +348,8 @@ class SMPPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
 
                 Log.d(TAG, "Sending reset command to device $mac")
                 
-                defaultManager?.reset(object : McuMgrCallback<McuMgrResetResponse> {
-                    override fun onResponse(response: McuMgrResetResponse) {
+                defaultManager?.reset(object : McuMgrCallback<McuMgrOsResponse> {
+                    override fun onResponse(response: McuMgrOsResponse) {
                         Log.d(TAG, "Device reset successful")
                         result.success(true)
                         
@@ -389,7 +389,9 @@ class SMPPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             }
         }
     }
-try {
+
+    private fun disconnect() {
+        try {
             uploadController?.cancel()
         } catch (e: Exception) {
             Log.w(TAG, "Error cancelling upload: ${e.message}")

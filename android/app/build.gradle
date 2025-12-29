@@ -60,8 +60,18 @@ flutter {
 }
 
 dependencies {
-    // Android native Nordic nRF Mesh SDK (stable version)
+    // Kotlin coroutines
+    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2"
+    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2"
+
+    // Nordic Android BLE Library (Kotlin)
+    implementation "no.nordicsemi.android:ble-ktx:2.9.0"
+    implementation "no.nordicsemi.android:ble:2.11.0"
+
+    // Nordic nRF Mesh Library (Java - published to Maven)
     implementation "no.nordicsemi.android:mesh:3.4.0"
-    // Recommended: Android BLE library used by nRF Mesh
-    implementation "no.nordicsemi.android:ble:2.4.0"
+
+    // McuMgr library for SMP DFU (Nordic Semiconductor)
+    implementation "no.nordicsemi.android:mcumgr-core:2.7.4"
+    implementation "no.nordicsemi.android:mcumgr-ble:2.7.4"
 }

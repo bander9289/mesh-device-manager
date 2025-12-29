@@ -103,6 +103,7 @@ ninja --version  # Verify installation
    yes | sdkmanager --licenses
    
    # Install SDK components for Android 15+ (API 34+)
+   # Note: platform-tools includes adb (Android Debug Bridge) for device communication
    sdkmanager "platform-tools" \
      "platforms;android-34" \
      "platforms;android-35" \
@@ -110,7 +111,13 @@ ninja --version  # Verify installation
      "cmdline-tools;latest"
    ```
 
-5. **Accept Flutter Android licenses:**
+5. **Verify adb is available:**
+   ```bash
+   which adb  # Should show path to adb in platform-tools
+   adb version  # Verify adb is working
+   ```
+
+6. **Accept Flutter Android licenses:**
    ```bash
    flutter doctor --android-licenses
    ```
@@ -257,11 +264,17 @@ flutter build appbundle --release
 
 ### Install and Run on Android Device
 
+**Prerequisites:** `adb` (Android Debug Bridge) is automatically included with Android SDK platform-tools (installed in step 4 above).
+
 ```bash
 # Enable USB debugging on your Android device first
 
-# Check device is connected
+# Verify adb is working and device is connected
 adb devices
+
+# If adb command not found, ensure platform-tools is in PATH:
+# export PATH=$PATH:$ANDROID_HOME/platform-tools
+# source ~/.bashrc
 
 # Install the APK
 adb install -r build/app/outputs/flutter-apk/app-debug.apk
@@ -339,6 +352,20 @@ which sdkmanager  # Should show path to sdkmanager
 ```bash
 flutter doctor --android-licenses
 # Accept all licenses by typing 'y'
+```
+
+### "adb: command not found"
+**Solution:**
+```bash
+# adb is included in Android SDK platform-tools
+# Verify platform-tools is in PATH
+echo $ANDROID_HOME/platform-tools
+export PATH=$PATH:$ANDROID_HOME/platform-tools
+source ~/.bashrc
+
+# Verify adb is now available
+which adb
+adb version
 ```
 
 ### No connected devices / ADB not recognizing device

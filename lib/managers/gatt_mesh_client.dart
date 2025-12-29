@@ -2,7 +2,10 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'mesh_client.dart';
+import 'smp_client.dart';
+import 'platform_smp_client.dart';
 import '../models/mesh_device.dart';
+import '../models/update_progress.dart';
 import '../utils/mac_address.dart';
 
 /// Basic GATT-based MeshClient fallback. It writes to known candidate characteristics
@@ -14,6 +17,9 @@ class GattMeshClient implements MeshClient {
   final bool Function()? isAppScanning; // optional provider to determine whether the app is scanning
   final Map<String, StreamSubscription<BluetoothConnectionState>> _connectionStateListeners = {}; // Track connection states
   final Set<String> _connectingDevices = {}; // Track devices currently connecting
+  
+  // SMP (Simple Management Protocol) client for firmware updates
+  late final SMPClient _smpClient;
 
   // Candidate characteristic UUIDs commonly used for light toggle / vendor features
   static const List<String> _candidateUuids = [
@@ -22,7 +28,9 @@ class GattMeshClient implements MeshClient {
     '0000ff02-0000-1000-8000-00805f9b34fb',
   ];
 
-  GattMeshClient({required this.deviceProvider, this.fallback, this.isAppScanning});
+  GattMeshClient({required this.deviceProvider, this.fallback, this.isAppScanning}) {
+    _smpClient = PlatformSMPClient();
+  }
 
   @override
   Future<void> initialize(Map<String, String>? credentials) async {
@@ -390,6 +398,159 @@ class GattMeshClient implements MeshClient {
       // Subscription failures are non-critical since battery comes from advertisements
       if (kDebugMode) debugPrint('GattMeshClient.subscribeToDeviceCharacteristics: skipping $macAddress (battery from adverts): $e');
       return false;
+    }
+  }
+  
+  /// Update firmware on a device via SMP DFU protocol.
+  ///
+  /// This method manages the complete firmware update workflow:
+  /// 1. Connect to device via BLE (not mesh)
+  /// 2. Establish SMP connection
+  /// 3. Upload firmware with progress tracking
+  /// 4. Verify image
+  /// 5. Reset device
+  /// 6. Wait for device to reboot
+  ///
+  /// Parameters:
+  /// - [device]: The target device to update
+  /// - [firmwareData]: The firmware binary data to upload
+  /// - [onProgress]: Callback invoked with UpdateProgress events
+  ///
+  /// Returns: A Future that completes when the update is finished
+  /// Throws: Exception on connection or upload failures
+  Future<void> updateFirmware({
+    required MeshDevice device,
+    required Uint8List firmwareData,
+    required Function(UpdateProgress) onProgress,
+  }) async {
+    final macAddress = device.macAddress;
+    
+    if (kDebugMode) {
+      debugPrint('GattMeshClient.updateFirmware: starting update for $macAddress (${firmwareData.length} bytes)');
+    }
+    
+    try {
+      // 1. Connect to device via SMP
+      onProgress(UpdateProgress(
+        deviceMac: macAddress,
+        bytesTransferred: 0,
+        totalBytes: firmwareData.length,
+        stage: UpdateStage.connecting,
+        startedAt: DateTime.now(),
+      ));
+      
+      final connected = await _smpClient.connect(macAddress);
+      if (!connected) {
+        throw Exception('Failed to establish SMP connection to $macAddress');
+      }
+      
+      if (kDebugMode) {
+        debugPrint('GattMeshClient.updateFirmware: SMP connection established');
+      }
+      
+      // 2. Upload firmware and listen to progress
+      final uploadStream = _smpClient.uploadFirmware(macAddress, firmwareData);
+      
+      await for (final progress in uploadStream) {
+        if (kDebugMode) {
+          debugPrint('GattMeshClient.updateFirmware: ${progress.stage} - ${progress.percentage.toStringAsFixed(1)}%');
+        }
+        
+        onProgress(progress);
+        
+        // If upload failed, throw exception
+        if (progress.stage == UpdateStage.failed) {
+          throw Exception(progress.errorMessage ?? 'Firmware upload failed');
+        }
+        
+        // If upload completed successfully, break the loop
+        if (progress.stage == UpdateStage.complete) {
+          if (kDebugMode) {
+            debugPrint('GattMeshClient.updateFirmware: firmware verified successfully');
+          }
+          break;
+        }
+      }
+      
+      // 3. Reset device to apply the new firmware
+      if (kDebugMode) {
+        debugPrint('GattMeshClient.updateFirmware: resetting device');
+      }
+      
+      onProgress(UpdateProgress(
+        deviceMac: macAddress,
+        bytesTransferred: firmwareData.length,
+        totalBytes: firmwareData.length,
+        stage: UpdateStage.rebooting,
+      ));
+      
+      final resetSuccess = await _smpClient.resetDevice(macAddress);
+      if (!resetSuccess) {
+        if (kDebugMode) {
+          debugPrint('GattMeshClient.updateFirmware: reset command may have failed, but device should reboot anyway');
+        }
+      }
+      
+      // 4. Wait for device to reboot (give it a few seconds)
+      await Future.delayed(const Duration(seconds: 3));
+      
+      // 5. Update complete
+      onProgress(UpdateProgress(
+        deviceMac: macAddress,
+        bytesTransferred: firmwareData.length,
+        totalBytes: firmwareData.length,
+        stage: UpdateStage.complete,
+        completedAt: DateTime.now(),
+      ));
+      
+      if (kDebugMode) {
+        debugPrint('GattMeshClient.updateFirmware: update completed successfully');
+      }
+      
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('GattMeshClient.updateFirmware: error during update: $e');
+      }
+      
+      // Notify caller of failure
+      onProgress(UpdateProgress(
+        deviceMac: macAddress,
+        bytesTransferred: 0,
+        totalBytes: firmwareData.length,
+        stage: UpdateStage.failed,
+        errorMessage: e.toString(),
+        completedAt: DateTime.now(),
+      ));
+      
+      rethrow;
+    } finally {
+      // Always disconnect SMP connection when done (success or failure)
+      try {
+        await _smpClient.disconnect();
+        if (kDebugMode) {
+          debugPrint('GattMeshClient.updateFirmware: SMP disconnected');
+        }
+      } catch (e) {
+        if (kDebugMode) {
+          debugPrint('GattMeshClient.updateFirmware: error disconnecting SMP: $e');
+        }
+      }
+    }
+  }
+  
+  /// Disconnect from SMP session.
+  /// Should be called when firmware updates are complete or cancelled.
+  Future<void> disconnectSMP() async {
+    try {
+      await _smpClient.disconnect();
+      if (kDebugMode) {
+        debugPrint('GattMeshClient.disconnectSMP: SMP disconnected');
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('GattMeshClient.disconnectSMP: error: $e');
+      }
+      rethrow;
     }
   }
 }

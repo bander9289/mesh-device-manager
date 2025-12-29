@@ -6,27 +6,31 @@ The app requires BLE Mesh network credentials (`netKey` and `appKey`) to communi
 ## Configuration Methods
 
 ### 1. Command Line (Development)
-Pass credentials directly when running or building:
+Load credentials from environment variables:
 
 ```bash
+# Load from .env file
+export $(cat .env | xargs)
 flutter run \
-  --dart-define=MESH_NET_KEY=78806728531AE9EDC4241E68749219AC \
-  --dart-define=MESH_APP_KEY=5AC5425AA36136F2513436EA29C358D5
+  --dart-define=MESH_NET_KEY=$MESH_NET_KEY \
+  --dart-define=MESH_APP_KEY=$MESH_APP_KEY
 ```
 
 Or for release builds:
 ```bash
+# Load production credentials
+export $(cat .env.production | xargs)
 flutter build apk \
-  --dart-define=MESH_NET_KEY=<your_net_key> \
-  --dart-define=MESH_APP_KEY=<your_app_key>
+  --dart-define=MESH_NET_KEY=$MESH_NET_KEY \
+  --dart-define=MESH_APP_KEY=$MESH_APP_KEY
 ```
 
-### 2. Environment Variables (CI/CD)
-Set environment variables and reference them:
+### 2. Environment Variables (Recommended)
+Set environment variables from a secure source and reference them:
 
 ```bash
-export MESH_NET_KEY=78806728531AE9EDC4241E68749219AC
-export MESH_APP_KEY=5AC5425AA36136F2513436EA29C358D5
+# Load from .env file (add .env to .gitignore!)
+export $(cat .env | xargs)
 
 flutter run \
   --dart-define=MESH_NET_KEY=$MESH_NET_KEY \
@@ -34,7 +38,7 @@ flutter run \
 ```
 
 ### 3. VS Code Configuration
-Add to `.vscode/launch.json`:
+Add to `.vscode/launch.json` to load credentials from environment:
 
 ```json
 {
@@ -45,12 +49,18 @@ Add to `.vscode/launch.json`:
       "request": "launch",
       "type": "dart",
       "args": [
-        "--dart-define=MESH_NET_KEY=78806728531AE9EDC4241E68749219AC",
-        "--dart-define=MESH_APP_KEY=5AC5425AA36136F2513436EA29C358D5"
+        "--dart-define=MESH_NET_KEY=${env:MESH_NET_KEY}",
+        "--dart-define=MESH_APP_KEY=${env:MESH_APP_KEY}"
       ]
     }
   ]
 }
+```
+
+**Note:** Load your environment variables before launching VS Code:
+```bash
+export $(cat .env | xargs)
+code .
 ```
 
 ### 4. Build Script

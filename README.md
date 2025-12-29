@@ -122,12 +122,21 @@ lib/
 3. **Configure mesh credentials:**
    Mesh credentials are configured at build time using `--dart-define`. See [MESH_CREDENTIALS.md](MESH_CREDENTIALS.md) for full details.
    
-   Quick start:
+   **Option A: Use the run script (recommended)**
    ```bash
-   flutter run \
-     --dart-define=MESH_NET_KEY=<your_network_key> \
-     --dart-define=MESH_APP_KEY=<your_app_key>
+   ./run.sh
    ```
+   This automatically loads credentials from your `.env` file.
+   
+   **Option B: Load .env then run**
+   ```bash
+   export $(cat .env | xargs)
+   flutter run \
+     --dart-define=MESH_NET_KEY=$MESH_NET_KEY \
+     --dart-define=MESH_APP_KEY=$MESH_APP_KEY
+   ```
+   
+   ⚠️ **Note:** Shell doesn't automatically load `.env` files. You must source it first.
 
 
 4. **Run the app:**
@@ -197,16 +206,23 @@ Mesh credentials are configured at build time using Flutter's `--dart-define` fe
 
 **For Development/Testing:**
 ```bash
+# Use the run script (loads from .env)
+./run.sh
+
+# Or load environment variables first
+export $(cat .env | xargs)
 flutter run \
-  --dart-define=MESH_NET_KEY=78806728531AE9EDC4241E68749219AC \
-  --dart-define=MESH_APP_KEY=5AC5425AA36136F2513436EA29C358D5
+  --dart-define=MESH_NET_KEY=$MESH_NET_KEY \
+  --dart-define=MESH_APP_KEY=$MESH_APP_KEY
 ```
 
 **For Production Builds:**
 ```bash
+# Load production credentials from secure source
+export $(cat .env.production | xargs)
 flutter build apk \
-  --dart-define=MESH_NET_KEY=<your_production_network_key> \
-  --dart-define=MESH_APP_KEY=<your_production_app_key>
+  --dart-define=MESH_NET_KEY=$MESH_NET_KEY \
+  --dart-define=MESH_APP_KEY=$MESH_APP_KEY
 ```
 
 📖 **Full Documentation:** See [MESH_CREDENTIALS.md](MESH_CREDENTIALS.md) for:

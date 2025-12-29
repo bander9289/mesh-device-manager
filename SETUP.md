@@ -1,158 +1,295 @@
 # Development Setup Guide
 
-## Current Status
+## Prerequisites Check
 
-✅ Flutter SDK installed at `/home/banders/Downloads/flutter/bin/flutter`
-✅ Flutter PATH already added to `~/.bashrc`
-❌ Android SDK not installed
-❌ Android Studio not installed
+Before starting, verify what's already installed:
 
-## Quick Fix for Current Terminal Session
-
-Run this in your current terminal to use Flutter immediately:
 ```bash
-export PATH="$PATH:/home/banders/Downloads/flutter/bin"
+# Check Flutter installation
+which flutter
+flutter --version
+
+# Check Android SDK
+echo $ANDROID_HOME
+ls -la ~/Android/Sdk 2>/dev/null || echo "Android SDK not installed"
+
+# Check Java (required for Android builds)
+java -version
 ```
 
-Or simply start a new terminal to load the PATH from `.bashrc`.
+## Flutter SDK Setup
 
-## Android Development Setup
+This app targets **Android 15+** and **iOS 16+** (see PRD.md and TECHNICAL.md).
 
-Based on your PRD and TECHNICAL specs, you need Android development tools since this app targets **Android 15+** and **iOS 16+**.
+### Install Flutter
 
-### Option 1: Install Android Studio (Recommended)
-
-Android Studio provides the easiest setup with GUI tools:
-
-1. **Download Android Studio:**
+1. **Download Flutter SDK:**
    ```bash
-   # Download from https://developer.android.com/studio
-   # Or use snap:
-   sudo snap install android-studio --classic
+   cd ~
+   git clone https://github.com/flutter/flutter.git -b stable
    ```
 
-2. **Install Android SDK Components:**
-   - Open Android Studio
-   - Go to **Settings** → **Appearance & Behavior** → **System Settings** → **Android SDK**
-   - Install:
-     - Android SDK Platform 34 (Android 14) - for compile SDK
-     - Android SDK Platform 35 (Android 15+) - target platform
-     - Android SDK Build-Tools 34.0.0
-     - Android SDK Command-line Tools
-     - Android SDK Platform-Tools
+2. **Add Flutter to PATH:**
    
-3. **Accept Android Licenses:**
+   Add to `~/.bashrc`:
    ```bash
-   flutter doctor --android-licenses
+   export PATH="$PATH:$HOME/flutter/bin"
    ```
 
-4. **Verify Setup:**
+3. **Apply changes:**
+   ```bash
+   source ~/.bashrc
+   # OR start a new terminal
+   ```
+
+4. **Run Flutter doctor:**
    ```bash
    flutter doctor
    ```
 
-### Option 2: Install Command-Line Tools Only (Lightweight)
-
-If you don't want the full Android Studio IDE:
-
-1. **Download Command-Line Tools:**
+5. **Disable analytics (optional):**
    ```bash
-   cd ~
-   mkdir -p Android/Sdk/cmdline-tools
-   cd Android/Sdk/cmdline-tools
+   flutter config --no-analytics
+   ```
+
+## Android Command-Line Tools Setup
+
+**This setup uses command-line tools only** (no Android Studio IDE required).
+
+### Install Java Development Kit
+
+```bash
+sudo apt update
+sudo apt install openjdk-17-jdk
+java -version  # Verify installation
+```
+
+### Install Android Command-Line Tools
+
+1. **Create SDK directory and download tools:**
+   ```bash
+   mkdir -p ~/Android/Sdk/cmdline-tools
+   cd ~/Android/Sdk/cmdline-tools
    
    # Download latest command-line tools
+   # Check https://developer.android.com/studio#command-line-tools-only for latest version
    wget https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
    unzip commandlinetools-linux-*.zip
    mv cmdline-tools latest
    rm commandlinetools-linux-*.zip
    ```
 
-2. **Set Environment Variables:**
+2. **Configure environment variables:**
+   
    Add to `~/.bashrc`:
    ```bash
    export ANDROID_HOME=$HOME/Android/Sdk
    export PATH=$PATH:$ANDROID_HOME/cmdline-tools/latest/bin
    export PATH=$PATH:$ANDROID_HOME/platform-tools
-   export PATH=$PATH:$ANDROID_HOME/emulator
+   export PATH=$PATH:$ANDROID_HOME/build-tools/34.0.0
    ```
 
-3. **Install SDK Components:**
+3. **Apply environment changes:**
    ```bash
    source ~/.bashrc
-   
-   sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0" "cmdline-tools;latest"
    ```
 
-4. **Accept Licenses:**
+4. **Install required SDK components:**
+   ```bash
+   # Accept licenses
+   yes | sdkmanager --licenses
+   
+   # Install SDK components for Android 15+ (API 34+)
+   sdkmanager "platform-tools" \
+     "platforms;android-34" \
+     "platforms;android-35" \
+     "build-tools;34.0.0" \
+     "cmdline-tools;latest"
+   ```
+
+5. **Accept Flutter Android licenses:**
    ```bash
    flutter doctor --android-licenses
    ```
 
-## iOS Development Setup (macOS Only)
+## iOS Development Setup
 
-Since you're on Linux (Pop!_OS), you **cannot develop for iOS locally**. iOS development requires:
-- macOS
-- Xcode 15+
-- CocoaPods
+**Requirements:** macOS with Xcode 15+ (iOS development cannot be done on Linux)
 
-**Options for iOS:**
-- Use a Mac for iOS development
-- Use cloud-based macOS CI/CD (GitHub Actions, Codemagic, etc.)
-- Focus on Android first, add iOS later
+### Install Xcode
 
-## Verify Installation
+1. **Download and install Xcode:**
+   - Open App Store on macOS
+   - Search for "Xcode"
+   - Install Xcode 15 or later
+   - Launch Xcode and accept license agreements
 
-After completing Android setup, run:
+2. **Install Xcode command-line tools:**
+   ```bash
+   sudo xcode-select --install
+   sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer
+   sudo xcodebuild -runFirstLaunch
+   ```
+
+3. **Verify Xcode installation:**
+   ```bash
+   xcodebuild -version
+   ```
+
+### Install CocoaPods
+
+CocoaPods manages iOS dependencies (required for this project):
+
+```bash
+# Install CocoaPods
+sudo gem install cocoapods
+
+# Verify installation
+pod --version
+```
+
+### Setup iOS Simulator
+
+```bash
+# List available simulators
+xcrun simctl list devices
+
+# Launch a simulator (example: iPhone 15)
+open -a Simulator
+```
+
+### Install iOS Dependencies
+
+```bash
+cd ios
+pod install
+cd ..
+```
+
+### Verify iOS Setup
+
+```bash
+flutter doctor
+```
+
+Expected iOS section:
+```
+[✓] Xcode - develop for iOS and macOS (Xcode 15.x)
+```
+
+### Run on iOS
+
+```bash
+# List iOS devices/simulators
+flutter devices
+
+# Run on iOS simulator
+flutter run -d ios
+
+# Run on connected iPhone/iPad (requires Apple Developer account)
+flutter run -d <device-id>
+```
+
+### iOS Development Options for Linux Users
+
+Since iOS development requires macOS, Linux users have these options:
+- **Remote Mac:** Use a Mac mini or MacBook for iOS builds
+- **Cloud CI/CD:** Use GitHub Actions (macOS runners), Codemagic, or Bitrise
+- **Focus on Android first:** Complete Android development, add iOS later
+- **Hackintosh/VM:** Not recommended (unstable, violates Apple EULA)
+
+## Verify Complete Setup
+
+After installing Flutter and Android SDK (and optionally iOS tools), run:
 
 ```bash
 flutter doctor -v
 ```
 
-Expected output:
+**Expected output (Linux with Android only):**
 ```
-[✓] Flutter (Channel stable, 3.38.4, on Pop!_OS 22.04)
+[✓] Flutter (Channel stable)
 [✓] Android toolchain - develop for Android devices (Android SDK version 34.0.0)
-[✓] Connected device (1 available)
+[✓] Network resources
+```
+
+**Expected output (macOS with Android and iOS):**
+```
+[✓] Flutter (Channel stable)
+[✓] Android toolchain - develop for Android devices (Android SDK version 34.0.0)
+[✓] Xcode - develop for iOS and macOS (Xcode 15.x)
 [✓] Network resources
 ```
 
 ## Project Setup
 
-Once Flutter and Android are configured:
+### Install Project Dependencies
 
-1. **Get Flutter Dependencies:**
-   ```bash
-   flutter pub get
-   ```
+```bash
+cd /home/banders/src/willis/mesh-device-manager
+flutter pub get
+```
 
-2. **Check for Issues:**
-   ```bash
-   # Repo policy: treat lints (including "info") as fatal.
-   flutter analyze --fatal-infos --fatal-warnings
-   ```
+### Analyze Code Quality
 
-   Notes:
-   - Analyzer configuration lives in `analysis_options.yaml`.
-   - If you edit `analyzer: exclude:` globs, quote any pattern starting with `*` (e.g. `"**/*.g.dart"`).
-     Unquoted `*`/`**` can be parsed by YAML as an alias, which breaks `flutter analyze` with an “Undefined alias” error.
-   - Excludes are intentionally broad for platform/build/generated outputs (e.g. `android/`, `ios/`, `linux/`, `build/`, `.dart_tool/`, and `**/generated/**`) so analysis focuses on our Dart sources.
+```bash
+# Repo policy: treat lints (including "info") as fatal
+flutter analyze --fatal-infos --fatal-warnings
+```
 
-3. **Run on Device/Emulator:**
-   ```bash
-   # List devices
-   flutter devices
-   
-   # Run on connected device
-   flutter run
-   
-   # Run on specific device
-   flutter run -d <device-id>
-   ```
+**Note:** Analyzer configuration is in `analysis_options.yaml`. Quote glob patterns starting with `*` (e.g. `"**/*.g.dart"`) to avoid YAML alias parsing errors. Excludes are intentionally broad for platform/build/generated outputs (e.g. `android/`, `ios/`, `linux/`, `build/`, `.dart_tool/`, and `**/generated/**`) so analysis focuses on our Dart sources.
+
+### Build for Android
+
+```bash
+# Debug build
+flutter build apk --debug
+
+# Release build (requires signing configuration)
+flutter build apk --release
+
+# Build app bundle (for Play Store)
+flutter build appbundle --release
+```
+
+### Install and Run on Android Device
+
+```bash
+# Enable USB debugging on your Android device first
+
+# Check device is connected
+adb devices
+
+# Install the APK
+adb install -r build/app/outputs/flutter-apk/app-debug.apk
+
+# Launch the app
+adb shell am start -n com.nordicmesh.nordic_mesh_manager/.MainActivity
+
+# View logs
+adb logcat -c  # Clear previous logs
+adb logcat | grep -E "(flutter|Flutter|Nordic)"  # Watch app logs
+```
+
+### Run from Flutter (Alternative)
+
+```bash
+# List available devices
+flutter devices
+
+# Run on connected device
+flutter run
+
+# Run on specific device
+flutter run -d <device-id>
+
+# Run with custom mesh credentials
+flutter run --dart-define=MESH_APP_KEY=your_key_here
+```
 
 ## Required Dependencies (from TECHNICAL.md)
 
-Add these to `pubspec.yaml` when starting development:
+These are already in `pubspec.yaml`:
 
 ```yaml
 dependencies:
@@ -178,48 +315,144 @@ dependencies:
 
 ## Troubleshooting
 
-### "flutter: command not found" in new terminal
-Solution: Restart terminal or run `source ~/.bashrc`
-
-### Android licenses not accepted
-Solution: Run `flutter doctor --android-licenses` and accept all
-
-### No connected devices
-Solution: 
-- Enable USB debugging on Android device
-- Use `adb devices` to verify connection
-- Or create an emulator in Android Studio
-
-### KVM not installed (for emulator)
-Solution:
+### "flutter: command not found"
+**Solution:** 
 ```bash
-sudo apt install qemu-kvm
-sudo adduser $USER kvm
-# Logout and login again
+source ~/.bashrc  # Reload shell configuration
+# OR start a new terminal
+which flutter  # Verify Flutter is in PATH
 ```
 
-## Next Steps
-
-1. ✅ Fix Flutter PATH (reload terminal)
-2. 📱 Install Android Studio or command-line tools
-3. ✅ Run `flutter doctor` to verify
-4. 📦 Run `flutter pub get` in project
-5. 🏃 Test with `flutter run`
-
-### Nordic Mesh dependency
-
-On Android, the Nordic Mesh library is included via Maven/Gradle in `android/app/build.gradle.kts`. To change versions, update the `no.nordicsemi.android:mesh:<version>` dependency there, then run:
-
+### "sdkmanager: command not found"
+**Solution:**
 ```bash
+echo $ANDROID_HOME  # Should show ~/Android/Sdk
+source ~/.bashrc  # Reload environment
+which sdkmanager  # Should show path to sdkmanager
+```
+
+### Android licenses not accepted
+**Solution:**
+```bash
+flutter doctor --android-licenses
+# Accept all licenses by typing 'y'
+```
+
+### No connected devices / ADB not recognizing device
+**Solution:**
+```bash
+# 1. Enable Developer Options and USB Debugging on Android device
+# 2. Connect device via USB
+# 3. Check connection
+adb devices
+
+# If device not listed, restart ADB
+adb kill-server
+adb start-server
+adb devices
+
+# Check USB permissions (Linux)
+lsusb  # Find your device
+# May need to add udev rules for your device vendor ID
+```
+
+### Build errors: "Gradle build failed"
+**Solution:**
+```bash
+# Clean project and rebuild
 flutter clean
 flutter pub get
-flutter run -d android
+flutter build apk --debug
+
+# Check Java version (needs JDK 17)
+java -version
+
+# Check Gradle wrapper permissions
+chmod +x android/gradlew
+```
+
+### iOS: CocoaPods installation issues
+**Solution:**
+```bash
+# Update Ruby gems
+sudo gem update --system
+
+# Reinstall CocoaPods
+sudo gem uninstall cocoapods
+sudo gem install cocoapods
+
+# Clean and reinstall pods
+cd ios
+rm -rf Pods Podfile.lock
+pod install
+cd ..
+```
+
+### iOS: "Xcode license not accepted"
+**Solution:**
+```bash
+sudo xcodebuild -license accept
+```
+
+## Quick Reference
+
+### Setup Checklist
+
+**Linux (Android development):**
+- [ ] Install Flutter SDK
+- [ ] Install Java JDK 17
+- [ ] Install Android command-line tools
+- [ ] Configure ANDROID_HOME and PATH
+- [ ] Run `flutter doctor` (Android toolchain should be green)
+- [ ] Run `flutter pub get` in project
+- [ ] Build and test: `flutter build apk --debug`
+
+**macOS (Android + iOS development):**
+- [ ] Install Flutter SDK
+- [ ] Install Java JDK 17
+- [ ] Install Android command-line tools
+- [ ] Install Xcode 15+
+- [ ] Install CocoaPods
+- [ ] Run `flutter doctor` (both Android and iOS toolchains green)
+- [ ] Run `flutter pub get` in project
+- [ ] Install iOS pods: `cd ios && pod install && cd ..`
+- [ ] Test both platforms
+
+### Nordic Mesh Dependency
+
+The Nordic Mesh library is included via Maven/Gradle in [android/app/build.gradle.kts](android/app/build.gradle.kts).
+
+**To update Nordic Mesh version:**
+1. Edit `android/app/build.gradle.kts`
+2. Change: `implementation("no.nordicsemi.android:mesh:<version>")`
+3. Rebuild:
+   ```bash
+   flutter clean
+   flutter pub get
+   flutter build apk
+   ```
+
+### Mesh Credentials Configuration
+
+Mesh credentials (app key, network key) are configured at build time using `--dart-define`. See [MESH_CREDENTIALS.md](MESH_CREDENTIALS.md) for details.
+
+```bash
+# Example: Build with custom mesh credentials
+flutter build apk --dart-define=MESH_APP_KEY=your_app_key
 ```
 
 ## References
 
-- [Flutter Installation Guide](https://docs.flutter.dev/get-started/install/linux)
-- [Android Studio Download](https://developer.android.com/studio)
-- [Android SDK Command-Line Tools](https://developer.android.com/studio#command-line-tools-only)
-- Project PRD: [PRD.md](./PRD.md)
-- Technical Spec: [TECHNICAL.md](./TECHNICAL.md)
+### Official Documentation
+- [Flutter Installation - Linux](https://docs.flutter.dev/get-started/install/linux)
+- [Flutter Installation - macOS](https://docs.flutter.dev/get-started/install/macos)
+- [Android Command-Line Tools](https://developer.android.com/studio#command-line-tools-only)
+- [Xcode Download](https://developer.apple.com/xcode/)
+- [CocoaPods Installation](https://guides.cocoapods.org/using/getting-started.html)
+
+### Project Documentation
+- [PRD.md](./PRD.md) - Product requirements
+- [TECHNICAL.md](./TECHNICAL.md) - Technical architecture
+- [MESH_CREDENTIALS.md](./MESH_CREDENTIALS.md) - Mesh credential configuration
+- [METHOD_CHANNEL_CONTRACT.md](./METHOD_CHANNEL_CONTRACT.md) - Platform channel interface
+- [UX.md](./UX.md) - User experience guidelines

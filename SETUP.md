@@ -56,13 +56,16 @@ This app targets **Android 15+** and **iOS 16+** (see PRD.md and TECHNICAL.md).
 
 **This setup uses command-line tools only** (no Android Studio IDE required).
 
-### Install Java Development Kit
+### Install Java Development Kit and Build Tools
 
 ```bash
 sudo apt update
-sudo apt install openjdk-17-jdk
+sudo apt install openjdk-17-jdk ninja-build
 java -version  # Verify installation
+ninja --version  # Verify installation
 ```
+
+**Note:** `ninja-build` is required for Android native code compilation (CMake builds).
 
 ### Install Android Command-Line Tools
 
@@ -371,6 +374,20 @@ java -version
 chmod +x android/gradlew
 ```
 
+### Build error: "Could not find Ninja on PATH"
+**Error:** `[CXX1416] Could not find Ninja on PATH or in SDK CMake bin folders.`
+
+**Solution:**
+```bash
+# Install ninja build system (required for CMake/native builds)
+sudo apt install ninja-build
+ninja --version  # Verify installation
+
+# Rebuild
+flutter clean
+flutter build apk --debug
+```
+
 ### iOS: CocoaPods installation issues
 **Solution:**
 ```bash
@@ -400,7 +417,7 @@ sudo xcodebuild -license accept
 
 **Linux (Android development):**
 - [ ] Install Flutter SDK
-- [ ] Install Java JDK 17
+- [ ] Install Java JDK 17 and ninja-build
 - [ ] Install Android command-line tools
 - [ ] Configure ANDROID_HOME and PATH
 - [ ] Run `flutter doctor` (Android toolchain should be green)

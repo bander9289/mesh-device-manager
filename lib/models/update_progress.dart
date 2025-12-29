@@ -58,7 +58,12 @@ class UpdateProgress {
       case UpdateStage.complete:
         return 100.0;
       case UpdateStage.failed:
-        return percentage; // Keep last known percentage
+        // Return current percentage based on bytes transferred
+        if (totalBytes > 0) {
+          final uploadPercent = (bytesTransferred / totalBytes) * 70.0;
+          return 10.0 + uploadPercent;
+        }
+        return 0.0;
     }
   }
 

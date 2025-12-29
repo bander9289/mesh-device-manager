@@ -34,7 +34,7 @@ class FirmwareFile {
     
     // Regex: <hardware_id>-<major>.<minor>.<revision>-<hash>.signed.bin
     final match = RegExp(
-      r'^([A-Z0-9\-]+)-(\d+)\.(\d+)\.(\d+)-([a-f0-9]+)\.signed\.bin$',
+      r'^([A-Za-z0-9\-]+)-(\d+)\.(\d+)\.(\d+)-([a-f0-9]+)\.signed\.bin$',
     ).firstMatch(fileName);
 
     if (match == null) {

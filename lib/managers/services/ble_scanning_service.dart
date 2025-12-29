@@ -105,18 +105,42 @@ class BleScanningService {
             ? r.device.platformName
             : (mac.length >= 8 ? mac.substring(mac.length - 8) : mac);
 
-        // Extract hardwareId from manufacturerData if present
+        // Parse hardwareId and version from device name (e.g., 'KMvHW-0A3F-2.1.5-a3d9c')
         String hw = 'unknown';
-        if (r.advertisementData.manufacturerData.isNotEmpty) {
+        String version = '';
+        
+        String deviceName = '';
+        try {
+          final adv = r.advertisementData.advName;
+          deviceName = adv.isNotEmpty ? adv : r.device.platformName;
+        } catch (_) {
+          deviceName = r.device.platformName;
+        }
+
+        if (deviceName.isNotEmpty) {
+          // Apply regex: ^([a-zA-Z0-9\-]+)-(\d+\.\d+\.\d+-[a-f0-9]+.*)$
+          // Matches: KMv2a-0.5.0-e927703+ or HW-0A3F-2.1.5-a3d9c
+          final nameRegex = RegExp(r'^([a-zA-Z0-9\-]+)-(\d+\.\d+\.\d+-[a-f0-9]+.*)$', caseSensitive: false);
+          final match = nameRegex.firstMatch(deviceName);
+          
+          if (match != null) {
+            hw = match.group(1) ?? 'unknown';
+            version = match.group(2) ?? '';
+          }
+        }
+        
+        // Fallback to manufacturer data if name parsing failed
+        if (hw == 'unknown' && r.advertisementData.manufacturerData.isNotEmpty) {
           final entry = r.advertisementData.manufacturerData.entries.first;
           hw = entry.value
               .map((b) => b.toRadixString(16).padLeft(2, '0'))
               .join();
         }
-
-        final version = r.advertisementData.serviceUuids.isNotEmpty
-            ? r.advertisementData.serviceUuids.join(',')
-            : '';
+        
+        // Fallback for version if not parsed from name
+        if (version.isEmpty && r.advertisementData.serviceUuids.isNotEmpty) {
+          version = r.advertisementData.serviceUuids.join(',');
+        }
 
         final device = MeshDevice(
           macAddress: mac,
@@ -140,9 +164,11 @@ class BleScanningService {
           final defaultGroupId = _groups.any((g) => g.id == 0xC000) ? 0xC000 : null;
           final nextGroupId = existing.groupId ?? defaultGroupId;
 
-          // update rssi only (battery stubbed for future implementation)
+          // Update if rssi, groupId, hardwareId, or version changed
           if (existing.rssi != device.rssi ||
-              nextGroupId != existing.groupId) {
+              nextGroupId != existing.groupId ||
+              existing.hardwareId != device.hardwareId ||
+              existing.version != device.version) {
             _devices[idx] = MeshDevice(
               macAddress: existing.macAddress,
               identifier: existing.identifier,

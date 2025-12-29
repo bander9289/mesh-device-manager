@@ -14,9 +14,10 @@ class FirmwareVersion implements Comparable<FirmwareVersion> {
     required this.hash,
   });
 
-  /// Parse version from string format: "2.1.5-a3d9c"
+  /// Parse version from string format: "2.1.5-a3d9c" or "0.5.0-e927703+"
+  /// Allows optional trailing characters after the hash.
   factory FirmwareVersion.parse(String versionString) {
-    final match = RegExp(r'^(\d+)\.(\d+)\.(\d+)-([a-f0-9]+)$')
+    final match = RegExp(r'^(\d+)\.(\d+)\.(\d+)-([a-f0-9]+).*$')
         .firstMatch(versionString);
     
     if (match == null) {

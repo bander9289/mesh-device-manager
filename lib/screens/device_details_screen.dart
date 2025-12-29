@@ -23,8 +23,10 @@ class DeviceDetailsScreen extends StatelessWidget {
             const SizedBox(height: 12),
             _buildInfoRow('Signal Strength', '${d.rssi} dBm'),
             const SizedBox(height: 12),
-            if (d.batteryPercent > 0)
-              _buildInfoRow('Battery Level', '${d.batteryPercent}%'),
+            _buildInfoRow(
+              'Battery Level',
+              d.batteryPercent < 0 ? 'Unknown' : '${d.batteryPercent}%',
+            ),
             const SizedBox(height: 24),
             const Divider(),
             const SizedBox(height: 12),

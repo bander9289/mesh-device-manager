@@ -9,16 +9,16 @@ import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
-import no.nordicsemi.android.mcumgr.McuMgrCallback
-import no.nordicsemi.android.mcumgr.McuMgrTransport
-import no.nordicsemi.android.mcumgr.ble.McuMgrBleTransport
-import no.nordicsemi.android.mcumgr.exception.McuMgrException
-import no.nordicsemi.android.mcumgr.managers.DefaultManager
-import no.nordicsemi.android.mcumgr.managers.ImageManager
-import no.nordicsemi.android.mcumgr.response.img.McuMgrImageStateResponse
-import no.nordicsemi.android.mcumgr.response.dflt.McuMgrResetResponse
-import no.nordicsemi.android.mcumgr.transfer.TransferController
-import no.nordicsemi.android.mcumgr.transfer.UploadCallback
+import io.runtime.mcumgr.McuMgrCallback
+import io.runtime.mcumgr.McuMgrTransport
+import io.runtime.mcumgr.ble.McuMgrBleTransport
+import io.runtime.mcumgr.exception.McuMgrException
+import io.runtime.mcumgr.managers.DefaultManager
+import io.runtime.mcumgr.managers.ImageManager
+import io.runtime.mcumgr.response.img.McuMgrImageStateResponse
+import io.runtime.mcumgr.response.dflt.McuMgrResetResponse
+import io.runtime.mcumgr.transfer.TransferController
+import io.runtime.mcumgr.transfer.UploadCallback
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -400,9 +400,7 @@ try {
             transport?.release()
         } catch (e: Exception) {
             Log.w(TAG, "Error releasing transport: ${e.message}")
-        }ull
-        
-        transport?.release()
+        }
         transport = null
         
         imageManager = null

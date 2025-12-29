@@ -56,9 +56,9 @@ dependencies {
     implementation("no.nordicsemi.android:mesh:3.2.1")
 
     // McuMgr library for SMP DFU (Nordic Semiconductor)
-    implementation("no.nordicsemi.android.mcumgr:mcumgr-core:2.0.2")
-    implementation("no.nordicsemi.android.mcumgr:mcumgr-ble:2.0.2")
+    implementation("no.nordicsemi.android:mcumgr-core:2.7.4")
+    implementation("no.nordicsemi.android:mcumgr-ble:2.7.4")
 
-    // CBOR encoding for SMP
-    implementation("com.fasterxml.jackson.dataformat:jackson-dataformat-cbor:2.15.3")
+    // CBOR encoding for SMP (included with mcumgr-ble)
+    // implementation("com.fasterxml.jackson.dataformat:jackson-dataformat-cbor:2.15.3")
 }

@@ -1,20 +1,5 @@
 import 'dart:typed_data';
-
-/// Progress information for firmware upload
-class UpdateProgress {
-  final int current;
-  final int total;
-  final int percentage;
-
-  UpdateProgress({
-    required this.current,
-    required this.total,
-    required this.percentage,
-  });
-
-  @override
-  String toString() => 'UpdateProgress(current: $current, total: $total, percentage: $percentage%)';
-}
+import '../models/update_progress.dart';
 
 /// Abstract interface for SMP (Simple Management Protocol) operations
 /// Used for firmware updates via Nordic McuMgr

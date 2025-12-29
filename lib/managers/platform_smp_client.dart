@@ -1,7 +1,7 @@
 import 'dart:async';
-import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import '../models/update_progress.dart';
 import 'smp_client.dart';
 
 /// Platform channel implementation of SMPClient
@@ -12,6 +12,8 @@ class PlatformSMPClient implements SMPClient {
   
   StreamSubscription? _eventSubscription;
   StreamController<UpdateProgress>? _uploadController;
+  String? _currentDeviceMac;
+  DateTime? _uploadStartTime;
 
   PlatformSMPClient() {
     // Listen to event channel for upload progress
@@ -30,35 +32,107 @@ class PlatformSMPClient implements SMPClient {
   void _handleEvent(Map<String, dynamic> event) {
     final type = event['type'] as String?;
     if (kDebugMode) {
-      debugPrint('PlatformSMPClient: received event type=$type');
+      debugPrint('PlatformSMPClient: received event type=$type, data=$event');
     }
 
     switch (type) {
       case 'progress':
-        final current = event['current'] as int? ?? 0;
-        final total = event['total'] as int? ?? 0;
-        final percentage = event['percentage'] as int? ?? 0;
-        _uploadController?.add(UpdateProgress(
-          current: current,
-          total: total,
-          percentage: percentage,
-        ));
+        final deviceMac = event['deviceMac'] as String? ?? _currentDeviceMac ?? '';
+        final bytesTransferred = event['bytesTransferred'] as int? ?? 0;
+        final totalBytes = event['totalBytes'] as int? ?? 0;
+        final stageStr = event['stage'] as String? ?? 'idle';
+        
+        // Parse stage from string
+        final stage = _parseUpdateStage(stageStr);
+        
+        final progress = UpdateProgress(
+          deviceMac: deviceMac,
+          bytesTransferred: bytesTransferred,
+          totalBytes: totalBytes,
+          stage: stage,
+          startedAt: _uploadStartTime,
+        );
+        
+        _uploadController?.add(progress);
         break;
+        
       case 'completed':
+        if (_currentDeviceMac != null) {
+          final progress = UpdateProgress(
+            deviceMac: _currentDeviceMac!,
+            bytesTransferred: 0,
+            totalBytes: 0,
+            stage: UpdateStage.complete,
+            startedAt: _uploadStartTime,
+            completedAt: DateTime.now(),
+          );
+          _uploadController?.add(progress);
+        }
         _uploadController?.close();
         _uploadController = null;
+        _currentDeviceMac = null;
+        _uploadStartTime = null;
         break;
+        
       case 'error':
         final message = event['message'] as String? ?? 'Unknown error';
+        if (_currentDeviceMac != null) {
+          final progress = UpdateProgress(
+            deviceMac: _currentDeviceMac!,
+            bytesTransferred: 0,
+            totalBytes: 0,
+            stage: UpdateStage.failed,
+            errorMessage: message,
+            startedAt: _uploadStartTime,
+            completedAt: DateTime.now(),
+          );
+          _uploadController?.add(progress);
+        }
         _uploadController?.addError(Exception('Upload failed: $message'));
         _uploadController?.close();
         _uploadController = null;
+        _currentDeviceMac = null;
+        _uploadStartTime = null;
         break;
+        
       case 'cancelled':
+        if (_currentDeviceMac != null) {
+          final progress = UpdateProgress(
+            deviceMac: _currentDeviceMac!,
+            bytesTransferred: 0,
+            totalBytes: 0,
+            stage: UpdateStage.failed,
+            errorMessage: 'Upload cancelled',
+            startedAt: _uploadStartTime,
+            completedAt: DateTime.now(),
+          );
+          _uploadController?.add(progress);
+        }
         _uploadController?.addError(Exception('Upload cancelled'));
         _uploadController?.close();
         _uploadController = null;
+        _currentDeviceMac = null;
+        _uploadStartTime = null;
         break;
+    }
+  }
+
+  UpdateStage _parseUpdateStage(String stageStr) {
+    switch (stageStr.toLowerCase()) {
+      case 'connecting':
+        return UpdateStage.connecting;
+      case 'uploading':
+        return UpdateStage.uploading;
+      case 'verifying':
+        return UpdateStage.verifying;
+      case 'rebooting':
+        return UpdateStage.rebooting;
+      case 'complete':
+        return UpdateStage.complete;
+      case 'failed':
+        return UpdateStage.failed;
+      default:
+        return UpdateStage.idle;
     }
   }
 
@@ -117,7 +191,18 @@ class PlatformSMPClient implements SMPClient {
       throw StateError('Upload already in progress');
     }
 
+    _currentDeviceMac = mac;
+    _uploadStartTime = DateTime.now();
     _uploadController = StreamController<UpdateProgress>();
+
+    // Send initial progress
+    _uploadController!.add(UpdateProgress(
+      deviceMac: mac,
+      bytesTransferred: 0,
+      totalBytes: data.length,
+      stage: UpdateStage.idle,
+      startedAt: _uploadStartTime,
+    ));
 
     // Start the upload in the background
     _startUpload(mac, data);
@@ -141,16 +226,48 @@ class PlatformSMPClient implements SMPClient {
       if (kDebugMode) {
         debugPrint('PlatformSMPClient: upload failed: ${e.message}');
       }
+      
+      if (_currentDeviceMac != null) {
+        final progress = UpdateProgress(
+          deviceMac: _currentDeviceMac!,
+          bytesTransferred: 0,
+          totalBytes: data.length,
+          stage: UpdateStage.failed,
+          errorMessage: e.message ?? 'Upload failed',
+          startedAt: _uploadStartTime,
+          completedAt: DateTime.now(),
+        );
+        _uploadController?.add(progress);
+      }
+      
       _uploadController?.addError(Exception('Upload failed: ${e.message}'));
       _uploadController?.close();
       _uploadController = null;
+      _currentDeviceMac = null;
+      _uploadStartTime = null;
     } catch (e) {
       if (kDebugMode) {
         debugPrint('PlatformSMPClient: unexpected upload error: $e');
       }
+      
+      if (_currentDeviceMac != null) {
+        final progress = UpdateProgress(
+          deviceMac: _currentDeviceMac!,
+          bytesTransferred: 0,
+          totalBytes: data.length,
+          stage: UpdateStage.failed,
+          errorMessage: e.toString(),
+          startedAt: _uploadStartTime,
+          completedAt: DateTime.now(),
+        );
+        _uploadController?.add(progress);
+      }
+      
       _uploadController?.addError(e);
       _uploadController?.close();
       _uploadController = null;
+      _currentDeviceMac = null;
+      _uploadStartTime = null;
     }
   }
 
@@ -200,5 +317,7 @@ class PlatformSMPClient implements SMPClient {
   void dispose() {
     _eventSubscription?.cancel();
     _uploadController?.close();
+    _currentDeviceMac = null;
+    _uploadStartTime = null;
   }
 }

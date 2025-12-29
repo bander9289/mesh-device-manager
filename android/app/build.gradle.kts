@@ -55,9 +55,9 @@ dependencies {
     // Nordic nRF Mesh Library (Java - published to Maven)
     implementation("no.nordicsemi.android:mesh:3.2.1")
 
-    // McuMgr library for SMP DFU
-    implementation("io.runtime.mcumgr:mcumgr-core:1.7.0")
-    implementation("io.runtime.mcumgr:mcumgr-ble:1.7.0")
+    // McuMgr library for SMP DFU (Nordic Semiconductor)
+    implementation("no.nordicsemi.android.mcumgr:mcumgr-core:2.0.2")
+    implementation("no.nordicsemi.android.mcumgr:mcumgr-ble:2.0.2")
 
     // CBOR encoding for SMP
     implementation("com.fasterxml.jackson.dataformat:jackson-dataformat-cbor:2.15.3")

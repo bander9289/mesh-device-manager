@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 import 'package:file_picker/file_picker.dart';
 import '../managers/device_manager.dart';
 import '../managers/firmware_manager.dart';
+import '../managers/gatt_mesh_client.dart';
 import '../models/mesh_device.dart';
 import '../models/firmware_file.dart';
 import '../models/update_progress.dart';
@@ -21,6 +22,7 @@ class _UpdatesScreenState extends State<UpdatesScreen> {
   DeviceSelectionMode _selectionMode = DeviceSelectionMode.outOfDate;
   final Set<String> _selectedDevices = {};
   final Map<String, UpdateProgress> _updateProgress = {};
+  final Map<String, String> _deviceErrors = {};
   bool _isUpdating = false;
 
   @override
@@ -35,8 +37,7 @@ class _UpdatesScreenState extends State<UpdatesScreen> {
 
   @override
   void dispose() {
-    final firmwareManager = context.read<FirmwareManager>();
-    firmwareManager.removeListener(_updateDeviceSelection);
+    context.read<FirmwareManager>().removeListener(_updateDeviceSelection);
     super.dispose();
   }
 
@@ -172,14 +173,130 @@ class _UpdatesScreenState extends State<UpdatesScreen> {
     );
   }
 
-  void _updateSelected() {
-    // TODO: Implement update logic with SMP client
-    // For now, show a message
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('Starting update for ${_selectedDevices.length} device(s)'),
-      ),
+  Future<void> _updateSelected() async {
+    final selectedDevices = _getSelectedDevices();
+    if (selectedDevices.isEmpty) return;
+
+    // Show confirmation dialog
+    final confirmed = await _showUpdateConfirmation(selectedDevices);
+    if (!confirmed || !mounted) return;
+
+    setState(() {
+      _isUpdating = true;
+      _deviceErrors.clear();
+    });
+
+    // Process updates sequentially
+    for (final device in selectedDevices) {
+      final firmwareManager = context.read<FirmwareManager>();
+      final firmware = firmwareManager.getFirmwareForDevice(device);
+      if (firmware == null) continue;
+
+      try {
+        await _updateDevice(device, firmware);
+      } catch (e) {
+        // Error handling - update device card with error
+        setState(() {
+          _deviceErrors[device.macAddress] = e.toString();
+          _updateProgress[device.macAddress] = UpdateProgress(
+            deviceMac: device.macAddress,
+            bytesTransferred: 0,
+            totalBytes: firmware.data.length,
+            stage: UpdateStage.failed,
+            errorMessage: e.toString(),
+            completedAt: DateTime.now(),
+          );
+        });
+      }
+    }
+
+    setState(() => _isUpdating = false);
+
+    // Show completion message
+    if (mounted) {
+      final successCount = selectedDevices.length - _deviceErrors.length;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Updates complete: $successCount/${selectedDevices.length} successful',
+          ),
+          backgroundColor: _deviceErrors.isEmpty ? Colors.green : Colors.orange,
+        ),
+      );
+    }
+  }
+
+  List<MeshDevice> _getSelectedDevices() {
+    if (!mounted) return [];
+    final deviceManager = context.read<DeviceManager>();
+    return deviceManager.devices
+        .where((d) => _selectedDevices.contains(d.macAddress))
+        .toList();
+  }
+
+  Future<void> _updateDevice(MeshDevice device, FirmwareFile firmware) async {
+    // Initialize progress tracking
+    setState(() {
+      _updateProgress[device.macAddress] = UpdateProgress(
+        deviceMac: device.macAddress,
+        bytesTransferred: 0,
+        totalBytes: firmware.data.length,
+        stage: UpdateStage.connecting,
+        startedAt: DateTime.now(),
+      );
+    });
+
+    // Get mesh client and call updateFirmware
+    final deviceManager = context.read<DeviceManager>();
+    final meshClient = deviceManager.meshClient;
+
+    // Check if meshClient supports firmware updates
+    if (meshClient is! GattMeshClient) {
+      throw Exception('Firmware updates not supported by current mesh client');
+    }
+
+    // Call updateFirmware with progress callbacks
+    await meshClient.updateFirmware(
+      device: device,
+      firmwareData: firmware.data,
+      onProgress: (progress) {
+        if (mounted) {
+          setState(() {
+            _updateProgress[device.macAddress] = progress;
+          });
+        }
+      },
     );
+
+    // Wait a bit for device to reboot and re-advertise
+    await Future.delayed(const Duration(seconds: 2));
+
+    // Note: Device version will be updated automatically when it re-advertises
+    // The scanning logic in device_manager will pick up the new version
+  }
+
+  Future<bool> _showUpdateConfirmation(List<MeshDevice> devices) async {
+    return await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('Confirm Firmware Update'),
+            content: Text(
+              'Update firmware on ${devices.length} device(s)?\n\n'
+              'This will take several minutes and devices will reboot.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(false),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.of(context).pop(true),
+                child: const Text('Update'),
+              ),
+            ],
+          ),
+        ) ??
+        false;
   }
 
   void _updateAll() {
@@ -189,13 +306,70 @@ class _UpdatesScreenState extends State<UpdatesScreen> {
     _updateSelected();
   }
 
-  void _reflashDevice(MeshDevice device) {
-    // TODO: Implement reflash logic
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('Re-flashing device ${device.macAddress}'),
-      ),
-    );
+  Future<void> _reflashDevice(MeshDevice device) async {
+    final firmwareManager = context.read<FirmwareManager>();
+    final firmware = firmwareManager.getFirmwareForDevice(device);
+    if (firmware == null) return;
+
+    // Show confirmation
+    final confirmed = await _showReflashConfirmation(device);
+    if (!confirmed || !mounted) return;
+
+    setState(() => _isUpdating = true);
+
+    try {
+      // Same as update but force regardless of version
+      await _updateDevice(device, firmware);
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Re-flash complete for ${device.macAddress}'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    } catch (e) {
+      setState(() {
+        _deviceErrors[device.macAddress] = e.toString();
+      });
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Re-flash failed: ${e.toString()}'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } finally {
+      setState(() => _isUpdating = false);
+    }
+  }
+
+  Future<bool> _showReflashConfirmation(MeshDevice device) async {
+    return await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('Confirm Re-flash'),
+            content: Text(
+              'Re-flash firmware on device ${device.macAddress}?\n\n'
+              'This will reinstall the same firmware version. '
+              'The device will reboot.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(false),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.of(context).pop(true),
+                child: const Text('Re-flash'),
+              ),
+            ],
+          ),
+        ) ??
+        false;
   }
 
   @override

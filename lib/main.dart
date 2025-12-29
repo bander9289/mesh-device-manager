@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'managers/device_manager.dart';
+import 'managers/firmware_manager.dart';
 import 'screens/devices_screen.dart';
 import 'screens/updates_screen.dart';
 
@@ -14,7 +15,10 @@ class NordicMeshManagerApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MultiProvider(
-      providers: [ChangeNotifierProvider(create: (_) => DeviceManager())],
+      providers: [
+        ChangeNotifierProvider(create: (_) => DeviceManager()),
+        ChangeNotifierProvider(create: (_) => FirmwareManager()),
+      ],
       child: MaterialApp(
         title: 'Nordic Mesh Manager',
         theme: ThemeData(
